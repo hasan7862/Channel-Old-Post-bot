@@ -24,8 +24,8 @@ SESSION_STRING = "BQI0makAaOaV435DZ54UwZ9yQyorV7BjDJhMbDkdUepGOwKRaczVDT_IueOC7s
 
 # 📢 Channel সনাক্তকরণ
 #    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
-CHANNEL_USERNAME = "TestChannelsexyy"   # অথবা "" ফাঁকা রাখুন
-CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
+CHANNEL_USERNAME = "ALQalamBD"   # অথবা "" ফাঁকা রাখুন
+CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
 #
@@ -43,10 +43,10 @@ CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-    ("9:00",  "AM"),
-    ("2:00",  "PM"),
-    ("6:00",  "PM"),
-    ("9:00",  "PM"),
+      ("5:00",  "AM"),
+    # ("2:00",  "PM"),
+    # ("6:00",  "PM"),
+    # ("9:00",  "PM"),
     # ("6:00",  "AM"),
     # ("11:30", "AM"),
     # ("4:30",  "PM"),
