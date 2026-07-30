@@ -1,0 +1,318 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║           AUTO POST REFRESHER — USER SESSION MODE              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  ✅ নির্ধারিত সময়ে Account connect হয়, কাজ শেষে disconnect।
+     সারাদিন Account active থাকে না।
+
+  📌 CHANNEL_USERNAME কীভাবে পাবেন?
+     Telegram-এ চ্যানেলে যান → Info → Username (t.me/xxxxx)
+     শুধু "xxxxx" অংশটুকু দিন (@ ছাড়া)।
+     Username না থাকলে CHANNEL_ID দিয়ে রাখুন, বট নিজে খুঁজে নেবে।
+"""
+
+# ====================================================================
+#                   ⚙️  CONFIGURATION  ⚙️
+#         (শুধু এই অংশ পরিবর্তন করুন — বাকি কোডে হাত দেবেন না)
+# ====================================================================
+
+# 🔑 Telegram Credentials (https://my.telegram.org)
+API_ID         = 37001641
+API_HASH       = "75aaefa6b305facc4745d25eb1fcf9f4"
+SESSION_STRING = "BQI0makAaOaV435DZ54UwZ9yQyorV7BjDJhMbDkdUepGOwKRaczVDT_IueOC7sG3ZcET39NovSL_Xk4hHGFehcHBaayHwQGioxunMZsbGBxvN4JPP4M0P7Qp_0mpMKD4Lzj8BYbgUPpYL6QpypOTmDc8Q_MEO5QgRjCed90XigP-MSUTDy77CQHfTcC2A6XxweUCASwRprby4bxf7f8PNpLKFx3KFTmvp7wz9v6uScDIJZMeqXqxpw3v9CWqKExp9O9UtHTXVR4po4CTK3OzjUQzRvjan7bq60Kz055y9KPBKs0ksO6bVkypn3nyfY43IdCxWS3rP4ECRv9A3z7R1YRLEnF6wgAAAAHPS6uXAA"
+
+# 📢 Channel সনাক্তকরণ
+#    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
+CHANNEL_USERNAME = "TestChannelsexyy"   # অথবা "" ফাঁকা রাখুন
+CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
+
+# ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
+#
+#    ফরম্যাট: ("ঘণ্টা:মিনিট", "AM/PM")
+#
+#    উদাহরণ:
+#      ("6:00",  "AM")  →  ভোর ৬:০০
+#      ("9:30",  "AM")  →  সকাল ৯:৩০
+#      ("12:00", "PM")  →  দুপুর ১২:০০
+#      ("2:00",  "PM")  →  দুপুর ২:০০
+#      ("6:00",  "PM")  →  সন্ধ্যা ৬:০০
+#      ("9:00",  "PM")  →  রাত ৯:০০
+#      ("11:30", "PM")  →  রাত ১১:৩০
+#
+#    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
+# ---------------------------------------------------------------
+SCHEDULE_TIMES = [
+    ("5:00",  "AM"),
+    #("5:00",  "PM"),
+    #("3:33",  "PM"),
+    #("10:10",  "PM"),
+    #("5:00",  "PM"),
+    # ("11:30", "AM"),
+    # ("4:30",  "PM"),
+    # ("11:00", "PM"),
+]
+
+# 📦 প্রতিটি সময়ে কতটি পোস্ট Refresh হবে (1 = একটা, 5 = পাঁচটা)
+POSTS_PER_RUN = 1
+
+# ====================================================================
+#           🔧 নিচের কোড পরিবর্তন করার প্রয়োজন নেই
+# ====================================================================
+
+import asyncio
+import logging
+import os
+import pytz
+from datetime import datetime
+from threading import Thread
+
+from flask import Flask
+from pyrogram import Client
+from pyrogram.errors import FloodWait, MessageDeleteForbidden, MessageIdInvalid
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+DHAKA_TZ    = pytz.timezone("Asia/Dhaka")
+JUMUAH_TAG  = "#jumuah"
+CHANNEL_TAG = "#alqalambd"
+
+
+# ── AM/PM → 24-hour ────────────────────────────────────────────────
+def parse_ampm(time_str: str, ampm: str):
+    h, m = map(int, time_str.strip().split(":"))
+    p = ampm.strip().upper()
+    if p == "AM":
+        if h == 12: h = 0
+    elif p == "PM":
+        if h != 12: h += 12
+    return h, m
+
+
+def is_jumuah(caption: str) -> bool:
+    c = (caption or "").lower()
+    return JUMUAH_TAG in c and CHANNEL_TAG in c
+
+def is_regular(caption: str) -> bool:
+    return JUMUAH_TAG not in (caption or "").lower()
+
+
+# ── Channel peer resolve (username → ID cache) ─────────────────────
+async def resolve_channel(client: Client) -> int:
+    """Channel-এর resolved ID ফেরত দেয়। Username থাকলে সেটা ব্যবহার করে,
+    না থাকলে dialogs খুঁজে CHANNEL_ID match করে।"""
+    if CHANNEL_USERNAME:
+        try:
+            chat = await client.get_chat(CHANNEL_USERNAME)
+            logger.info(f"📢 Channel: {chat.title} (id={chat.id})")
+            return chat.id
+        except Exception as e:
+            logger.warning(f"⚠️  Username দিয়ে resolve হয়নি: {e} — dialog search চেষ্টা করছি...")
+
+    # Fallback: dialogs থেকে খোঁজা
+    async for dialog in client.get_dialogs():
+        if dialog.chat.id == CHANNEL_ID:
+            logger.info(f"📢 Channel dialog থেকে পাওয়া: {dialog.chat.title}")
+            return dialog.chat.id
+    raise RuntimeError(f"Channel পাওয়া যায়নি (ID={CHANNEL_ID}, Username={CHANNEL_USERNAME})")
+
+
+# ── একটি Refresh চক্র: connect → কাজ → disconnect ─────────────────
+async def run_refresh():
+    now       = datetime.now(DHAKA_TZ)
+    is_friday = now.weekday() == 4   # 0=Mon, 4=Fri
+
+    logger.info(
+        f"\n{'='*56}\n"
+        f"  🔄 Auto Refresh শুরু\n"
+        f"  ⏰ সময় : {now.strftime('%I:%M %p')} (BD)\n"
+        f"  📅 দিন  : {'শুক্রবার ✅' if is_friday else now.strftime('%A')}\n"
+        f"{'='*56}"
+    )
+
+    client    = Client(
+        name           = "refresher",
+        api_id         = API_ID,
+        api_hash       = API_HASH,
+        session_string = SESSION_STRING,
+    )
+    refreshed = 0
+
+    try:
+        await client.start()
+        me = await client.get_me()
+        logger.info(f"🔗 Account: {me.first_name} (@{me.username})")
+
+        channel_id = await resolve_channel(client)
+
+        # পুরনো থেকে নতুন ক্রমে পোস্ট সাজানো
+        messages = []
+        async for msg in client.get_chat_history(channel_id, limit=200):
+            messages.append(msg)
+        messages.sort(key=lambda m: m.date)
+
+        logger.info(f"📋 চ্যানেলে {len(messages)}টি পোস্ট পাওয়া গেছে")
+
+        for msg in messages:
+            if refreshed >= POSTS_PER_RUN:
+                break
+            if msg.service or msg.empty:
+                continue
+
+            caption = msg.caption or msg.text or ""
+
+            # শুক্রবার: শুধু Jumuah পোস্ট Refresh হবে
+            if is_friday:
+                if not is_jumuah(caption):
+                    continue
+            else:
+                # অন্য দিন: Jumuah পোস্ট বাদ
+                if not is_regular(caption):
+                    continue
+
+            old_id  = msg.id
+            preview = caption[:70].replace("\n", " ") if caption else "[media]"
+            logger.info(f"\n  🎯 Refresh: id={old_id} | {preview}")
+
+            try:
+                # হুবহু কপি করে নতুন পোস্ট (caption সহ)
+                new = await client.copy_message(
+                    chat_id      = channel_id,
+                    from_chat_id = channel_id,
+                    message_id   = old_id,
+                )
+                logger.info(f"  ✅ নতুন পোস্ট → new_id={new.id}")
+
+            except Exception as copy_err:
+                # copy না হলে forward করা (sticker/poll ইত্যাদির জন্য)
+                logger.warning(f"  ⚠️  copy_message ব্যর্থ ({copy_err}) — forward চেষ্টা করছি...")
+                try:
+                    fwd = await client.forward_messages(
+                        chat_id     = channel_id,
+                        from_chat_id= channel_id,
+                        message_ids = old_id,
+                    )
+                    logger.info(f"  ✅ Forward সফল → new_id={fwd.id}")
+                except Exception as fwd_err:
+                    logger.error(f"  ❌ forward_messages ব্যর্থ: {fwd_err} — skip")
+                    continue
+
+            await asyncio.sleep(1.5)
+
+            # পুরনো পোস্ট ডিলেট
+            try:
+                await client.delete_messages(channel_id, old_id)
+                logger.info(f"  🗑️  পুরনো পোস্ট ডিলেট → old_id={old_id}\n")
+            except FloodWait as e:
+                logger.warning(f"  ⏳ FloodWait {e.value}s...")
+                await asyncio.sleep(e.value + 1)
+                await client.delete_messages(channel_id, old_id)
+            except Exception as del_err:
+                logger.error(f"  ❌ delete ব্যর্থ: {del_err}")
+
+            refreshed += 1
+
+        if refreshed == 0:
+            if is_friday:
+                logger.info("  ℹ️  শুক্রবার: #ALQalamBD + #Jumuah পোস্ট পাওয়া যায়নি")
+            else:
+                logger.info("  ℹ️  Refresh-যোগ্য পোস্ট পাওয়া যায়নি")
+
+    except FloodWait as e:
+        logger.warning(f"⏳ FloodWait {e.value}s — পরবর্তী সময়ে চেষ্টা হবে")
+        await asyncio.sleep(e.value)
+    except Exception as e:
+        logger.error(f"❌ Refresh ব্যর্থ: {e}")
+    finally:
+        try:
+            await client.stop()
+        except Exception:
+            pass
+        logger.info(f"🔌 Account disconnect | ✅ {refreshed}টি পোস্ট Refresh হয়েছে\n")
+
+
+# ── Flask keep-alive (Render free tier) ────────────────────────────
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    now = datetime.now(DHAKA_TZ).strftime("%Y-%m-%d %I:%M %p")
+    sl  = []
+    for ts, p in SCHEDULE_TIMES:
+        h, m = parse_ampm(ts, p)
+        h12  = h % 12 or 12
+        ap   = "AM" if h < 12 else "PM"
+        sl.append(f"{h12}:{m:02d} {ap}")
+    return (
+        "<h2>✅ Auto Post Refresher চলছে</h2>"
+        f"<p>বাংলাদেশ সময়: <b>{now}</b></p>"
+        "<p>💡 Account শুধু Refresh-এর সময় connect হয়</p>"
+        f"<p>Channel: <b>@{CHANNEL_USERNAME or CHANNEL_ID}</b></p>"
+        f"<p>Schedule ({len(sl)}টি):<br>"
+        + "<br>".join(f"&nbsp;&nbsp;• {s} (BD)" for s in sl)
+        + f"</p><p>প্রতিবার: <b>{POSTS_PER_RUN}</b>টি পোস্ট</p>"
+    )
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    try:
+        flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
+    except OSError:
+        flask_app.run(host="0.0.0.0", port=8090, use_reloader=False)
+
+
+# ── Main ────────────────────────────────────────────────────────────
+async def main():
+    Thread(target=run_flask, daemon=True).start()
+    logger.info("🌐 Keep-alive সার্ভার চালু")
+
+    scheduler = AsyncIOScheduler(timezone=DHAKA_TZ)
+    labels    = []
+
+    for entry in SCHEDULE_TIMES:
+        try:
+            ts, period = entry
+            h, m   = parse_ampm(ts, period)
+            h12    = h % 12 or 12
+            ap     = "AM" if h < 12 else "PM"
+            label  = f"{h12}:{m:02d} {ap}"
+
+            scheduler.add_job(
+                run_refresh,
+                trigger  = "cron",
+                hour     = h,
+                minute   = m,
+                timezone = DHAKA_TZ,
+                id       = f"job_{h:02d}{m:02d}",
+                name     = label,
+                misfire_grace_time = 300,
+            )
+            labels.append(label)
+        except Exception as e:
+            logger.error(f"❌ ভুল সময়: {entry} → {e}")
+
+    scheduler.start()
+
+    now = datetime.now(DHAKA_TZ)
+    logger.info(
+        f"\n{'='*60}\n"
+        f"  🤖 Auto Post Refresher সক্রিয়!\n"
+        f"  📅 বাংলাদেশ সময়  : {now.strftime('%Y-%m-%d %I:%M %p')}\n"
+        f"  📢 Channel        : @{CHANNEL_USERNAME or CHANNEL_ID}\n"
+        f"  ⏰ Schedule       : {', '.join(labels)}\n"
+        f"  📦 প্রতিবার       : {POSTS_PER_RUN}টি পোস্ট\n"
+        f"  💡 Account শুধু Refresh-এর সময় active হয়\n"
+        f"{'='*60}"
+    )
+
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
