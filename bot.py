@@ -43,11 +43,11 @@ CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-    ("5:00",  "AM"),
-    #("5:00",  "PM"),
-    #("3:33",  "PM"),
-    #("10:10",  "PM"),
-    #("5:00",  "PM"),
+    ("9:00",  "AM"),
+    ("2:00",  "PM"),
+    ("6:00",  "PM"),
+    ("9:00",  "PM"),
+    # ("6:00",  "AM"),
     # ("11:30", "AM"),
     # ("4:30",  "PM"),
     # ("11:00", "PM"),
@@ -66,6 +66,12 @@ import os
 import pytz
 from datetime import datetime
 from threading import Thread
+
+# Python 3.12+ fix: event loop must exist before Pyrogram loads
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 from flask import Flask
 from pyrogram import Client
