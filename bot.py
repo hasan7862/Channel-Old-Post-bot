@@ -24,8 +24,8 @@ SESSION_STRING = "BQI0makAaOaV435DZ54UwZ9yQyorV7BjDJhMbDkdUepGOwKRaczVDT_IueOC7s
 
 # 📢 Channel সনাক্তকরণ
 #    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
-CHANNEL_USERNAME = "TestChannelsexyy"   # অথবা "" ফাঁকা রাখুন
-CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
+CHANNEL_USERNAME = "ALQalamBD"          # অথবা "" ফাঁকা রাখুন
+CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
 #
@@ -43,7 +43,7 @@ CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-    ("6:15",  "AM"),
+    ("9:10",  "AM"),
     #("2:00",  "PM"),
     #("6:00",  "PM"),
     #("9:00",  "PM"),
@@ -161,6 +161,7 @@ async def run_refresh():
         messages = []
         async for msg in client.get_chat_history(channel_id, limit=200):
             messages.append(msg)
+        messages = [m for m in messages if m.date is not None]
         messages.sort(key=lambda m: m.date)
 
         logger.info(f"📋 চ্যানেলে {len(messages)}টি পোস্ট পাওয়া গেছে")
