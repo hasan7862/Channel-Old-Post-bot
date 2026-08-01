@@ -24,8 +24,8 @@ SESSION_STRING = "BQI0makAaOaV435DZ54UwZ9yQyorV7BjDJhMbDkdUepGOwKRaczVDT_IueOC7s
 
 # 📢 Channel সনাক্তকরণ
 #    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
-CHANNEL_USERNAME = "ALQalamBD"   # অথবা "" ফাঁকা রাখুন
-CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
+CHANNEL_USERNAME = "TestChannelsexyy"   # অথবা "" ফাঁকা রাখুন
+CHANNEL_ID       = -1004487545015       # Channel ID (backup হিসেবে)
 
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
 #
@@ -43,10 +43,10 @@ CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-      ("5:00",  "AM"),
-    # ("2:00",  "PM"),
-    # ("6:00",  "PM"),
-    # ("9:00",  "PM"),
+    ("6:15",  "AM"),
+    #("2:00",  "PM"),
+    #("6:00",  "PM"),
+    #("9:00",  "PM"),
     # ("6:00",  "AM"),
     # ("11:30", "AM"),
     # ("4:30",  "PM"),
@@ -76,7 +76,7 @@ except RuntimeError:
 from flask import Flask
 from pyrogram import Client
 from pyrogram.errors import FloodWait, MessageDeleteForbidden, MessageIdInvalid
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,12 +273,23 @@ def run_flask():
         flask_app.run(host="0.0.0.0", port=8090, use_reloader=False)
 
 
+# ── Sync wrapper — BackgroundScheduler এর thread থেকে async চালায় ──
+def run_refresh_sync():
+    """BackgroundScheduler এর job হিসেবে চলে — fresh event loop তৈরি করে"""
+    logger.info("⏰ Scheduler job fire হয়েছে → Refresh শুরু হচ্ছে...")
+    try:
+        asyncio.run(run_refresh())
+    except Exception as e:
+        logger.error(f"❌ run_refresh_sync error: {e}")
+
+
 # ── Main ────────────────────────────────────────────────────────────
-async def main():
+def main():
     Thread(target=run_flask, daemon=True).start()
     logger.info("🌐 Keep-alive সার্ভার চালু")
 
-    scheduler = AsyncIOScheduler(timezone=DHAKA_TZ)
+    # BackgroundScheduler: নিজের thread-এ চলে, asyncio loop এর উপর নির্ভর করে না
+    scheduler = BackgroundScheduler(timezone=DHAKA_TZ)
     labels    = []
 
     for entry in SCHEDULE_TIMES:
@@ -290,16 +301,18 @@ async def main():
             label  = f"{h12}:{m:02d} {ap}"
 
             scheduler.add_job(
-                run_refresh,
+                run_refresh_sync,
                 trigger  = "cron",
                 hour     = h,
                 minute   = m,
                 timezone = DHAKA_TZ,
                 id       = f"job_{h:02d}{m:02d}",
                 name     = label,
-                misfire_grace_time = 300,
+                misfire_grace_time = None,   # কখনো skip করবে না, দেরিতে হলেও চলবে
+                coalesce = True,             # একসাথে অনেক missed job → শুধু একবার চলবে
             )
             labels.append(label)
+            logger.info(f"  ✅ Job যোগ হয়েছে: {label}")
         except Exception as e:
             logger.error(f"❌ ভুল সময়: {entry} → {e}")
 
@@ -317,8 +330,16 @@ async def main():
         f"{'='*60}"
     )
 
-    await asyncio.Event().wait()
+    # Main thread জীবিত রাখা — scheduler background-এ চলতে থাকবে
+    try:
+        while True:
+            import time
+            time.sleep(60)
+            logger.debug(f"💓 alive | {datetime.now(DHAKA_TZ).strftime('%I:%M %p')}")
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+        logger.info("🛑 Scheduler বন্ধ হয়েছে")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
