@@ -43,7 +43,7 @@ CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-      ("5:00",  "AM"),
+      ("8:00",  "AM"),
     # ("2:00",  "PM"),
     # ("6:00",  "PM"),
     # ("9:00",  "PM"),
@@ -55,6 +55,7 @@ SCHEDULE_TIMES = [
 
 # 📦 প্রতিটি সময়ে কতটি পোস্ট Refresh হবে (1 = একটা, 5 = পাঁচটা)
 POSTS_PER_RUN = 1
+
 
 # ====================================================================
 #           🔧 নিচের কোড পরিবর্তন করার প্রয়োজন নেই
@@ -73,10 +74,10 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
+import time
 from flask import Flask
 from pyrogram import Client
 from pyrogram.errors import FloodWait, MessageDeleteForbidden, MessageIdInvalid
-from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,38 @@ def is_jumuah(caption: str) -> bool:
 
 def is_regular(caption: str) -> bool:
     return JUMUAH_TAG not in (caption or "").lower()
+
+
+# ── Fired-slot tracker (restart-proof) ────────────────────────────
+# "YYYY-MM-DD HH:MM" ফরম্যাটে চলে-যাওয়া slot ফাইলে রাখে।
+# Restart হলেও ফাইল টিকে থাকে → একই মিনিটে দুবার চলবে না।
+_SLOTS_FILE = "fired_slots.txt"
+
+def _load_slots() -> set:
+    try:
+        with open(_SLOTS_FILE) as f:
+            return {ln.strip() for ln in f if ln.strip()}
+    except FileNotFoundError:
+        return set()
+
+def _persist_slot(slot: str):
+    """slot key ফাইলে লিখে রাখে (append)।"""
+    try:
+        with open(_SLOTS_FILE, "a") as f:
+            f.write(slot + "\n")
+    except Exception as e:
+        logger.warning(f"⚠️  slot সেভ হয়নি: {e}")
+
+def _prune_slots(slots: set) -> set:
+    """আজকের আগের পুরনো slot ছেঁটে ফেলে — ফাইল ছোট রাখে।"""
+    today = datetime.now(DHAKA_TZ).strftime("%Y-%m-%d")
+    kept  = {s for s in slots if s.startswith(today)}
+    try:
+        with open(_SLOTS_FILE, "w") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+    except Exception:
+        pass
+    return kept
 
 
 # ── Channel peer resolve (username → ID cache) ─────────────────────
@@ -274,50 +307,36 @@ def run_flask():
         flask_app.run(host="0.0.0.0", port=8090, use_reloader=False)
 
 
-# ── Sync wrapper — BackgroundScheduler এর thread থেকে async চালায় ──
-def run_refresh_sync():
-    """BackgroundScheduler এর job হিসেবে চলে — fresh event loop তৈরি করে"""
-    logger.info("⏰ Scheduler job fire হয়েছে → Refresh শুরু হচ্ছে...")
+# ── Sync wrapper — clock thread থেকে async চালায় ──────────────────
+def _run_refresh_sync():
+    """Clock scheduler-এর daemon thread হিসেবে চলে — fresh event loop তৈরি করে।"""
+    logger.info("⏰ Scheduled time match → Refresh শুরু হচ্ছে...")
     try:
         asyncio.run(run_refresh())
     except Exception as e:
-        logger.error(f"❌ run_refresh_sync error: {e}")
+        logger.error(f"❌ _run_refresh_sync error: {e}")
 
 
-# ── Main ────────────────────────────────────────────────────────────
-def main():
-    Thread(target=run_flask, daemon=True).start()
-    logger.info("🌐 Keep-alive সার্ভার চালু")
+# ── Clock-based scheduler loop ──────────────────────────────────────
+def _clock_scheduler():
+    """
+    প্রতি ৩০ সেকেন্ডে BD ঘড়ি চেক করে।
+    SCHEDULE_TIMES-এ সেট করা মিনিট হলেই — এবং সেই slot আগে না চললে —
+    refresh job চালায়।
 
-    # BackgroundScheduler: নিজের thread-এ চলে, asyncio loop এর উপর নির্ভর করে না
-    scheduler = BackgroundScheduler(timezone=DHAKA_TZ)
-    labels    = []
+    Restart-proof: চলে-যাওয়া slot _SLOTS_FILE-এ persist থাকে।
+    Render ৫০০ বার restart দিলেও সঠিক মিনিট ছাড়া চলবে না।
+    """
+    # startup: আজকের পুরনো slot লোড করো
+    fired = _prune_slots(_load_slots())
 
-    for entry in SCHEDULE_TIMES:
-        try:
-            ts, period = entry
-            h, m   = parse_ampm(ts, period)
-            h12    = h % 12 or 12
-            ap     = "AM" if h < 12 else "PM"
-            label  = f"{h12}:{m:02d} {ap}"
-
-            scheduler.add_job(
-                run_refresh_sync,
-                trigger  = "cron",
-                hour     = h,
-                minute   = m,
-                timezone = DHAKA_TZ,
-                id       = f"job_{h:02d}{m:02d}",
-                name     = label,
-                misfire_grace_time = None,   # কখনো skip করবে না, দেরিতে হলেও চলবে
-                coalesce = True,             # একসাথে অনেক missed job → শুধু একবার চলবে
-            )
-            labels.append(label)
-            logger.info(f"  ✅ Job যোগ হয়েছে: {label}")
-        except Exception as e:
-            logger.error(f"❌ ভুল সময়: {entry} → {e}")
-
-    scheduler.start()
+    # schedule label তৈরি করো (log-এর জন্য)
+    labels = []
+    for ts, p in SCHEDULE_TIMES:
+        h, m  = parse_ampm(ts, p)
+        h12   = h % 12 or 12
+        ap    = "AM" if h < 12 else "PM"
+        labels.append(f"{h12}:{m:02d} {ap}")
 
     now = datetime.now(DHAKA_TZ)
     logger.info(
@@ -325,21 +344,58 @@ def main():
         f"  🤖 Auto Post Refresher সক্রিয়!\n"
         f"  📅 বাংলাদেশ সময়  : {now.strftime('%Y-%m-%d %I:%M %p')}\n"
         f"  📢 Channel        : @{CHANNEL_USERNAME or CHANNEL_ID}\n"
-        f"  ⏰ Schedule       : {', '.join(labels)}\n"
+        f"  ⏰ Schedule       : {', '.join(labels) or '(কোনো সময় সেট নেই)'}\n"
         f"  📦 প্রতিবার       : {POSTS_PER_RUN}টি পোস্ট\n"
         f"  💡 Account শুধু Refresh-এর সময় active হয়\n"
+        f"  🔁 চেক           : প্রতি ৩০ সেকেন্ডে BD সময় দেখা হয়\n"
         f"{'='*60}"
     )
 
-    # Main thread জীবিত রাখা — scheduler background-এ চলতে থাকবে
+    while True:
+        try:
+            now      = datetime.now(DHAKA_TZ)
+            today    = now.strftime("%Y-%m-%d")
+            slot_key = now.strftime("%Y-%m-%d %H:%M")
+
+            # নতুন দিন শুরু হলে in-memory set রিফ্রেশ করো
+            # (ফাইলে ইতিমধ্যে আগের দিনের slot নেই — _prune_slots মুছে দিয়েছে)
+            if not any(s.startswith(today) for s in fired) and fired:
+                fired = _prune_slots(fired)
+
+            # এই মিনিটে কোনো scheduled time আছে কিনা চেক
+            for ts, period in SCHEDULE_TIMES:
+                h, m = parse_ampm(ts, period)
+                if now.hour == h and now.minute == m and slot_key not in fired:
+                    # ── সাথে সাথে slot mark করো → rapid restart-এও দ্বিতীয়বার চলবে না
+                    fired.add(slot_key)
+                    _persist_slot(slot_key)
+                    logger.info(
+                        f"⏰ {now.strftime('%I:%M %p')} BD — scheduled! → job চালু হচ্ছে"
+                    )
+                    Thread(target=_run_refresh_sync, daemon=True).start()
+                    break   # একাধিক slot একই মিনিটে থাকলেও একবারই চলবে
+
+        except Exception as e:
+            logger.error(f"❌ clock scheduler error: {e}")
+
+        time.sleep(30)
+
+
+# ── Main ────────────────────────────────────────────────────────────
+def main():
+    Thread(target=run_flask, daemon=True).start()
+    logger.info("🌐 Keep-alive সার্ভার চালু")
+
+    # Clock scheduler background thread-এ চলবে
+    Thread(target=_clock_scheduler, daemon=True).start()
+
+    # Main thread জীবিত রাখা
     try:
         while True:
-            import time
             time.sleep(60)
             logger.debug(f"💓 alive | {datetime.now(DHAKA_TZ).strftime('%I:%M %p')}")
     except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown()
-        logger.info("🛑 Scheduler বন্ধ হয়েছে")
+        logger.info("🛑 Refresher বন্ধ হয়েছে")
 
 
 if __name__ == "__main__":
