@@ -43,7 +43,7 @@ CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-      ("8:00",  "AM"),
+      ("8:20",  "AM"),
     # ("2:00",  "PM"),
     # ("6:00",  "PM"),
     # ("9:00",  "PM"),
@@ -140,6 +140,36 @@ def _prune_slots(slots: set) -> set:
     except Exception:
         pass
     return kept
+
+def _prefill_past_slots(fired: set) -> set:
+    """
+    Startup-এ আজকের যেসব scheduled time ইতিমধ্যে পেরিয়ে গেছে (>১ মিনিট আগে),
+    সেগুলো fired সেটে ভরে দেয়।
+
+    কেন দরকার:
+      Render-এ প্রতি deploy-এ fresh container আসে → fired_slots.txt থাকে না।
+      তাই ৮টায় deploy হলে ৫টার slot আবার fire করত।
+      এই ফাংশন সেটা ঠেকায়।
+    """
+    now   = datetime.now(DHAKA_TZ)
+    today = now.strftime("%Y-%m-%d")
+    now_total_mins = now.hour * 60 + now.minute
+
+    for ts, period in SCHEDULE_TIMES:
+        h, m = parse_ampm(ts, period)
+        sched_total_mins = h * 60 + m
+        # ১ মিনিটের বেশি আগে হলে — পুরনো, skip করো
+        if now_total_mins - sched_total_mins > 1:
+            slot_key = f"{today} {h:02d}:{m:02d}"
+            if slot_key not in fired:
+                fired.add(slot_key)
+                _persist_slot(slot_key)
+                h12 = h % 12 or 12
+                ap  = "AM" if h < 12 else "PM"
+                logger.info(
+                    f"⏭️  Startup guard: আজকের {h12}:{m:02d} {ap} slot পেরিয়ে গেছে → skip হবে"
+                )
+    return fired
 
 
 # ── Channel peer resolve (username → ID cache) ─────────────────────
@@ -327,8 +357,9 @@ def _clock_scheduler():
     Restart-proof: চলে-যাওয়া slot _SLOTS_FILE-এ persist থাকে।
     Render ৫০০ বার restart দিলেও সঠিক মিনিট ছাড়া চলবে না।
     """
-    # startup: আজকের পুরনো slot লোড করো
+    # startup: আজকের পুরনো slot লোড করো, তারপর আজকের পেরিয়ে-যাওয়া slots মার্ক করো
     fired = _prune_slots(_load_slots())
+    fired = _prefill_past_slots(fired)
 
     # schedule label তৈরি করো (log-এর জন্য)
     labels = []
