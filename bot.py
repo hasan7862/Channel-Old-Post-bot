@@ -57,7 +57,7 @@ SCHEDULE_TIMES = [
 FRIDAY_SCHEDULE_TIMES = [
        ("12:01", "AM"),
        ("03:59", "AM"),
-       ("08:40", "PM"),
+       ("08:40", "AM"),
        ("12:15", "PM"),
 ]
 
