@@ -37,7 +37,6 @@ CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-      ("5:05",  "AM"),
       ("11:11", "PM"),
       ("1:11",  "AM"),
       ("3:33",  "AM"),
@@ -45,6 +44,21 @@ SCHEDULE_TIMES = [
     # ("11:30", "AM"),
     # ("4:30",  "PM"),
     # ("11:00", "PM"),
+]
+
+# 🕌 শুক্রবারের Jumuah পোস্টের আলাদা সময়সূচি (বাংলাদেশ সময়)
+#
+#    এখানে সময় দিলে শুক্রবারে SCHEDULE_TIMES আর ব্যবহার হবে না;
+#    শুধু এই তালিকার সময়গুলোতেই Jumuah পোস্ট Refresh হবে।
+#
+#    তালিকাটি খালি রাখলে আগের নিয়ম বজায় থাকবে — শুক্রবারেও
+#    SCHEDULE_TIMES-এর সময়ে Jumuah পোস্ট Refresh হবে।
+# ---------------------------------------------------------------
+FRIDAY_SCHEDULE_TIMES = [
+       ("12:01", "AM"),
+       ("03:59", "AM"),
+       ("08:40", "PM"),
+       ("12:15", "PM"),
 ]
 
 # 📦 প্রতিটি সময়ে কতটি পোস্ট Refresh হবে (1 = একটা, 5 = পাঁচটা)
@@ -94,6 +108,30 @@ def parse_ampm(time_str: str, ampm: str):
     elif p == "PM":
         if h != 12: h += 12
     return h, m
+
+
+def schedule_for(now=None):
+    """
+    নির্দিষ্ট দিনের জন্য কার্যকর সময়সূচি ফেরত দেয়।
+
+    Friday list খালি থাকলে পুরনো SCHEDULE_TIMES fallback হিসেবে থাকে,
+    যাতে নতুন কনফিগ না দিলেও আগের আচরণ নষ্ট না হয়।
+    """
+    current = now or datetime.now(DHAKA_TZ)
+    if current.weekday() == 4 and FRIDAY_SCHEDULE_TIMES:
+        return FRIDAY_SCHEDULE_TIMES
+    return SCHEDULE_TIMES
+
+
+def format_schedule(schedule_times) -> list:
+    """সময়গুলোকে মানুষের পড়ার উপযোগী ১২ ঘণ্টার format-এ দেখায়।"""
+    labels = []
+    for ts, period in schedule_times:
+        h, m = parse_ampm(ts, period)
+        h12 = h % 12 or 12
+        ap = "AM" if h < 12 else "PM"
+        labels.append(f"{h12}:{m:02d} {ap}")
+    return labels
 
 
 def is_jumuah(caption: str) -> bool:
@@ -148,8 +186,9 @@ def _prefill_past_slots(fired: set) -> set:
     now   = datetime.now(DHAKA_TZ)
     today = now.strftime("%Y-%m-%d")
     now_total_mins = now.hour * 60 + now.minute
+    today_schedule = schedule_for(now)
 
-    for ts, period in SCHEDULE_TIMES:
+    for ts, period in today_schedule:
         h, m = parse_ampm(ts, period)
         sched_total_mins = h * 60 + m
         # ১ মিনিটের বেশি আগে হলে — পুরনো, skip করো
@@ -190,12 +229,15 @@ async def resolve_channel(client: Client) -> int:
 async def run_refresh():
     now       = datetime.now(DHAKA_TZ)
     is_friday = now.weekday() == 4   # 0=Mon, 4=Fri
+    friday_custom_schedule = is_friday and bool(FRIDAY_SCHEDULE_TIMES)
 
     logger.info(
         f"\n{'='*56}\n"
         f"  🔄 Auto Refresh শুরু\n"
         f"  ⏰ সময় : {now.strftime('%I:%M %p')} (BD)\n"
         f"  📅 দিন  : {'শুক্রবার ✅' if is_friday else now.strftime('%A')}\n"
+        f"  🗓️ সময়সূচি : "
+        f"{'শুক্রবারের আলাদা সময়' if friday_custom_schedule else 'সাধারণ সময়সূচি'}\n"
         f"{'='*56}"
     )
 
@@ -307,19 +349,22 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     now = datetime.now(DHAKA_TZ).strftime("%Y-%m-%d %I:%M %p")
-    sl  = []
-    for ts, p in SCHEDULE_TIMES:
-        h, m = parse_ampm(ts, p)
-        h12  = h % 12 or 12
-        ap   = "AM" if h < 12 else "PM"
-        sl.append(f"{h12}:{m:02d} {ap}")
+    regular_sl = format_schedule(SCHEDULE_TIMES)
+    friday_sl = format_schedule(FRIDAY_SCHEDULE_TIMES)
+    friday_text = (
+        ", ".join(friday_sl) + " (শুধু Jumuah)"
+        if friday_sl
+        else "সাধারণ সময়সূচি অনুসরণ করবে"
+    )
     return (
         "<h2>✅ Auto Post Refresher চলছে</h2>"
         f"<p>বাংলাদেশ সময়: <b>{now}</b></p>"
         "<p>💡 Account শুধু Refresh-এর সময় connect হয়</p>"
         f"<p>Channel: <b>@{CHANNEL_USERNAME or CHANNEL_ID}</b></p>"
-        f"<p>Schedule ({len(sl)}টি):<br>"
-        + "<br>".join(f"&nbsp;&nbsp;• {s} (BD)" for s in sl)
+        f"<p>সাধারণ Schedule ({len(regular_sl)}টি):<br>"
+        + "<br>".join(f"&nbsp;&nbsp;• {s} (BD)" for s in regular_sl)
+        + f"</p><p>শুক্রবারের Jumuah Schedule:<br>"
+        + f"&nbsp;&nbsp;• {friday_text}"
         + f"</p><p>প্রতিবার: <b>{POSTS_PER_RUN}</b>টি পোস্ট</p>"
     )
 
@@ -355,21 +400,21 @@ def _clock_scheduler():
     fired = _prune_slots(_load_slots())
     fired = _prefill_past_slots(fired)
 
-    # schedule label তৈরি করো (log-এর জন্য)
-    labels = []
-    for ts, p in SCHEDULE_TIMES:
-        h, m  = parse_ampm(ts, p)
-        h12   = h % 12 or 12
-        ap    = "AM" if h < 12 else "PM"
-        labels.append(f"{h12}:{m:02d} {ap}")
-
     now = datetime.now(DHAKA_TZ)
+    regular_labels = format_schedule(SCHEDULE_TIMES)
+    friday_labels = format_schedule(FRIDAY_SCHEDULE_TIMES)
+    friday_schedule_label = (
+        ", ".join(friday_labels)
+        if friday_labels
+        else "সাধারণ সময়সূচির fallback"
+    )
     logger.info(
         f"\n{'='*60}\n"
         f"  🤖 Auto Post Refresher সক্রিয়!\n"
         f"  📅 বাংলাদেশ সময়  : {now.strftime('%Y-%m-%d %I:%M %p')}\n"
         f"  📢 Channel        : @{CHANNEL_USERNAME or CHANNEL_ID}\n"
-        f"  ⏰ Schedule       : {', '.join(labels) or '(কোনো সময় সেট নেই)'}\n"
+        f"  ⏰ সাধারণ Schedule : {', '.join(regular_labels) or '(কোনো সময় সেট নেই)'}\n"
+        f"  🕌 Friday Schedule : {friday_schedule_label}\n"
         f"  📦 প্রতিবার       : {POSTS_PER_RUN}টি পোস্ট\n"
         f"  💡 Account শুধু Refresh-এর সময় active হয়\n"
         f"  🔁 চেক           : প্রতি ৩০ সেকেন্ডে BD সময় দেখা হয়\n"
@@ -381,6 +426,7 @@ def _clock_scheduler():
             now      = datetime.now(DHAKA_TZ)
             today    = now.strftime("%Y-%m-%d")
             slot_key = now.strftime("%Y-%m-%d %H:%M")
+            today_schedule = schedule_for(now)
 
             # নতুন দিন শুরু হলে in-memory set রিফ্রেশ করো
             # (ফাইলে ইতিমধ্যে আগের দিনের slot নেই — _prune_slots মুছে দিয়েছে)
@@ -388,7 +434,7 @@ def _clock_scheduler():
                 fired = _prune_slots(fired)
 
             # এই মিনিটে কোনো scheduled time আছে কিনা চেক
-            for ts, period in SCHEDULE_TIMES:
+            for ts, period in today_schedule:
                 h, m = parse_ampm(ts, period)
                 if now.hour == h and now.minute == m and slot_key not in fired:
                     # ── সাথে সাথে slot mark করো → rapid restart-এও দ্বিতীয়বার চলবে না
