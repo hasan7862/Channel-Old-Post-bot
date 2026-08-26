@@ -27,6 +27,11 @@ SESSION_STRING = "BQI0makAaOaV435DZ54UwZ9yQyorV7BjDJhMbDkdUepGOwKRaczVDT_IueOC7s
 CHANNEL_USERNAME = "ALQalamBD"          # অথবা "" ফাঁকা রাখুন
 CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
+# 📢 দ্বিতীয় চ্যানেল — এখানে নতুন copy পোস্ট হবে
+# এই চ্যানেলের কোনো message delete করা হবে না।
+TARGET_CHANNEL_ID = -1003704917412
+JOIN_REQUESTS_PER_RUN = 40
+
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
 #
 #    ফরম্যাট: ("ঘণ্টা:মিনিট", "AM/PM")
@@ -97,6 +102,8 @@ logger = logging.getLogger(__name__)
 DHAKA_TZ    = pytz.timezone("Asia/Dhaka")
 JUMUAH_TAG  = "#jumuah"
 CHANNEL_TAG = "#alqalambd"
+TARGET_ISLAM_TAG = "#Islam"
+TARGET_JUMUAH_TAG = "#Jumuah"
 
 
 # ── AM/PM → 24-hour ────────────────────────────────────────────────
@@ -225,6 +232,80 @@ async def resolve_channel(client: Client) -> int:
     raise RuntimeError(f"Channel পাওয়া যায়নি (ID={CHANNEL_ID}, Username={CHANNEL_USERNAME})")
 
 
+async def approve_target_join_requests(client: Client, target_channel_id: int) -> int:
+    """Pending join request থেকে সর্বোচ্চ ৪০টি request approve করে।"""
+    approved = 0
+    try:
+        async for request in client.get_chat_join_requests(
+            target_channel_id,
+            limit=JOIN_REQUESTS_PER_RUN,
+        ):
+            user = getattr(request, "from_user", None) or getattr(request, "user", None)
+            user_id = getattr(user, "id", None)
+            if user_id is None:
+                logger.warning("⚠️ Join request-এ user ID পাওয়া যায়নি — skip")
+                continue
+
+            try:
+                await client.approve_chat_join_request(target_channel_id, user_id)
+                approved += 1
+                logger.info(
+                    f"✅ Target join request approved: "
+                    f"{getattr(user, 'first_name', '')} (id={user_id})"
+                )
+            except FloodWait as e:
+                logger.warning(
+                    f"⏳ Approval FloodWait {e.value}s — এই run-এ {approved}টি approve হয়েছে"
+                )
+                await asyncio.sleep(e.value + 1)
+                break
+            except Exception as request_err:
+                logger.warning(
+                    f"⚠️ Join request approve ব্যর্থ (id={user_id}): {request_err}"
+                )
+    except FloodWait as e:
+        logger.warning(f"⏳ Join request list-এ FloodWait {e.value}s")
+        await asyncio.sleep(e.value)
+    except Exception as e:
+        logger.warning(f"⚠️ Target join request পড়া যায়নি: {e}")
+
+    logger.info(
+        f"👥 Target channel join approval: {approved}/{JOIN_REQUESTS_PER_RUN}"
+    )
+    return approved
+
+
+def target_caption(caption: str, is_friday: bool) -> str:
+    """Target channel-এর জন্য source caption-এর শেষে আলাদা tag যোগ করে।"""
+    tag = TARGET_JUMUAH_TAG if is_friday else TARGET_ISLAM_TAG
+    base = (caption or "").rstrip()
+    return f"{base}\n\n{tag}" if base else tag
+
+
+async def copy_to_target_with_caption(
+    client: Client,
+    target_channel_id: int,
+    source_channel_id: int,
+    message,
+    caption: str,
+):
+    """
+    Target channel-এ নতুন post তৈরি করে এবং target-specific caption রাখে।
+    Media হলে copy_message, text হলে send_message ব্যবহার করা হয়।
+    """
+    if getattr(message, "media", None):
+        return await client.copy_message(
+            chat_id=target_channel_id,
+            from_chat_id=source_channel_id,
+            message_id=message.id,
+            caption=caption,
+        )
+    return await client.send_message(
+        chat_id=target_channel_id,
+        text=caption,
+    )
+
+
 # ── একটি Refresh চক্র: connect → কাজ → disconnect ─────────────────
 async def run_refresh():
     now       = datetime.now(DHAKA_TZ)
@@ -255,6 +336,11 @@ async def run_refresh():
         logger.info(f"🔗 Account: {me.first_name} (@{me.username})")
 
         channel_id = await resolve_channel(client)
+        target_channel_id = TARGET_CHANNEL_ID
+        target_chat = await client.get_chat(target_channel_id)
+        logger.info(
+            f"📢 Target channel: {target_chat.title} (id={target_chat.id})"
+        )
 
         # পুরনো থেকে নতুন ক্রমে পোস্ট সাজানো
         messages = []
@@ -287,27 +373,36 @@ async def run_refresh():
             logger.info(f"\n  🎯 Refresh: id={old_id} | {preview}")
 
             try:
-                # হুবহু কপি করে নতুন পোস্ট (caption সহ)
-                new = await client.copy_message(
+                # Target channel-এ আলাদা caption সহ নতুন post হবে।
+                # শুক্রবারে শুধু #Jumuah, অন্য দিনে শুধু #Islam যোগ হবে।
+                target_new = await copy_to_target_with_caption(
+                    client=client,
+                    target_channel_id=target_channel_id,
+                    source_channel_id=channel_id,
+                    message=msg,
+                    caption=target_caption(caption, is_friday),
+                )
+                logger.info(
+                    f"  ✅ Target channel-এ নতুন পোস্ট → new_id={target_new.id}"
+                )
+
+                # বর্তমান source channel-এও নতুন refreshed copy রাখি।
+                # দুই channel-এর copy সফল না হওয়া পর্যন্ত old post delete হবে না।
+                source_new = await client.copy_message(
                     chat_id      = channel_id,
                     from_chat_id = channel_id,
                     message_id   = old_id,
                 )
-                logger.info(f"  ✅ নতুন পোস্ট → new_id={new.id}")
+                logger.info(
+                    f"  ✅ Source channel-এ refreshed copy → new_id={source_new.id}"
+                )
 
             except Exception as copy_err:
-                # copy না হলে forward করা (sticker/poll ইত্যাদির জন্য)
-                logger.warning(f"  ⚠️  copy_message ব্যর্থ ({copy_err}) — forward চেষ্টা করছি...")
-                try:
-                    fwd = await client.forward_messages(
-                        chat_id     = channel_id,
-                        from_chat_id= channel_id,
-                        message_ids = old_id,
-                    )
-                    logger.info(f"  ✅ Forward সফল → new_id={fwd.id}")
-                except Exception as fwd_err:
-                    logger.error(f"  ❌ forward_messages ব্যর্থ: {fwd_err} — skip")
-                    continue
+                logger.error(
+                    f"  ❌ দুই channel-এ copy সম্পূর্ণ হয়নি: {copy_err} — "
+                    "source old post delete হবে না"
+                )
+                continue
 
             await asyncio.sleep(1.5)
 
@@ -323,6 +418,10 @@ async def run_refresh():
                 logger.error(f"  ❌ delete ব্যর্থ: {del_err}")
 
             refreshed += 1
+
+        # Scheduled run-এর সঙ্গে target channel-এর pending request approve হবে।
+        # Target channel-এর কোনো message এখানে delete করা হয় না।
+        await approve_target_join_requests(client, target_channel_id)
 
         if refreshed == 0:
             if is_friday:
@@ -412,10 +511,12 @@ def _clock_scheduler():
         f"\n{'='*60}\n"
         f"  🤖 Auto Post Refresher সক্রিয়!\n"
         f"  📅 বাংলাদেশ সময়  : {now.strftime('%Y-%m-%d %I:%M %p')}\n"
-        f"  📢 Channel        : @{CHANNEL_USERNAME or CHANNEL_ID}\n"
+        f"  📢 Source Channel : @{CHANNEL_USERNAME or CHANNEL_ID}\n"
+        f"  📢 Target Channel : {TARGET_CHANNEL_ID}\n"
         f"  ⏰ সাধারণ Schedule : {', '.join(regular_labels) or '(কোনো সময় সেট নেই)'}\n"
         f"  🕌 Friday Schedule : {friday_schedule_label}\n"
-        f"  📦 প্রতিবার       : {POSTS_PER_RUN}টি পোস্ট\n"
+        f"  📦 প্রতিবার       : {POSTS_PER_RUN}টি পোস্ট + "
+        f"{JOIN_REQUESTS_PER_RUN}টি পর্যন্ত join approval\n"
         f"  💡 Account শুধু Refresh-এর সময় active হয়\n"
         f"  🔁 চেক           : প্রতি ৩০ সেকেন্ডে BD সময় দেখা হয়\n"
         f"{'='*60}"
