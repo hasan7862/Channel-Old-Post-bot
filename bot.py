@@ -37,10 +37,10 @@ TARGET_CHANNEL_USERNAME = "Islamic_Stor"
 # একাধিক tag কমা দিয়ে লিখুন — যেমন:
 # "#Alqalam, #Islamic, #Quran"
 # পোস্টে এগুলো একই লাইনে space দিয়ে দেখা যাবে।
-SOURCE_CAPTION_TAGS = "#Alqalam"
-FRIDAY_SOURCE_CAPTION_TAGS = "#Alqalam, #Jumah"
-TARGET_CAPTION_TAGS = "#islam"
-FRIDAY_TARGET_CAPTION_TAGS = "#jumah"
+SOURCE_CAPTION_TAGS = "#ALQalambd"
+FRIDAY_SOURCE_CAPTION_TAGS = "#AlQalamBd, #Jumuah_Mubarak"
+TARGET_CAPTION_TAGS = "#IslamicStore"
+FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
 # ০ দিলে pending join request approval বন্ধ থাকবে।
 JOIN_REQUESTS_PER_RUN = 40
@@ -58,7 +58,7 @@ SCHEDULE_TIMES = [
       ("11:11", "PM"),
       ("01:11", "AM"),
       ("03:33", "AM"),
-      ("10:25", "AM"),
+      ("03:25", "PM"),
     # ("11:00", "AM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
@@ -76,7 +76,7 @@ FRIDAY_SCHEDULE_TIMES = [
        ("12:01", "AM"),
        ("03:45", "AM"),
        ("08:40", "AM"),
-       ("11:40", "AM"),
+       ("11:46", "AM"),
        ("01:15", "PM"),
 ]
 
