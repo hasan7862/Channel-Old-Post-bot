@@ -58,7 +58,7 @@ SCHEDULE_TIMES = [
       ("11:11", "PM"),
       ("01:11", "AM"),
       ("03:33", "AM"),
-      ("03:25", "PM"),
+      ("10:25", "AM"),
     # ("11:00", "AM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
@@ -80,8 +80,10 @@ FRIDAY_SCHEDULE_TIMES = [
        ("01:15", "PM"),
 ]
 
-# 📦 প্রতিটি সময়ে কতটি পোস্ট Refresh হবে (1 = একটা, 5 = পাঁচটা)
-POSTS_PER_RUN = 1
+# 📦 Refresh policy
+# প্রতিটি scheduled time-এ source channel-এর সব পোস্টের মধ্যে
+# সবচেয়ে পুরনো matching/tagged পোস্টটি একটিমাত্র refresh হবে।
+# কোনো history limit বা মোট পোস্টের সংখ্যা এখানে সেট করার দরকার নেই।
 
 
 # ====================================================================
@@ -194,15 +196,23 @@ def caption_with_tags(caption: str, tag_config: str) -> str:
 
 def is_jumuah(caption: str) -> bool:
     c = (caption or "").lower()
-    source_tags = parse_tags(SOURCE_CAPTION_TAGS)
-    source_markers = {CHANNEL_TAG, *(tag.lower() for tag in source_tags)}
-    return any(tag in c for tag in JUMUAH_TAGS) and any(
-        tag in c for tag in source_markers
-    )
+    return any(tag in c for tag in JUMUAH_TAGS) and has_source_tag(c)
+
+def has_source_tag(caption: str) -> bool:
+    c = (caption or "").lower()
+    source_markers = {
+        CHANNEL_TAG,
+        *(tag.lower() for tag in parse_tags(SOURCE_CAPTION_TAGS)),
+        *(tag.lower() for tag in parse_tags(FRIDAY_SOURCE_CAPTION_TAGS)),
+    }
+    return any(tag in c for tag in source_markers)
 
 def is_regular(caption: str) -> bool:
     c = (caption or "").lower()
-    return not any(tag in c for tag in JUMUAH_TAGS)
+    return (
+        has_source_tag(c)
+        and not any(tag in c for tag in JUMUAH_TAGS)
+    )
 
 
 # ── Fired-slot tracker (restart-proof) ────────────────────────────
@@ -469,35 +479,48 @@ async def run_refresh():
         target_chat = await resolve_target_channel(client)
         target_channel_id = target_chat.id
 
-        # পুরনো থেকে নতুন ক্রমে পোস্ট সাজানো
-        messages = []
-        async for msg in client.get_chat_history(channel_id, limit=200):
-            messages.append(msg)
-        messages = [m for m in messages if m.date is not None]
-        messages.sort(key=lambda m: m.date)
-
-        logger.info(f"📋 চ্যানেলে {len(messages)}টি পোস্ট পাওয়া গেছে")
-
-        for msg in messages:
-            if refreshed >= POSTS_PER_RUN:
-                break
-            if msg.service or msg.empty:
+        # Pyrogram history newest → oldest আসে। কোনো limit না দিয়ে পুরো
+        # history scan করি, কিন্তু সব message list-এ জমাই না। ফলে channel-এ
+        # ২০০, ২০০০ বা তারও বেশি post থাকলেও memory অযথা বাড়ে না।
+        #
+        # scan চলাকালে date compare করে সবচেয়ে পুরনো eligible candidate রাখি।
+        # ফলে API history order বদলালেও সঠিক oldest post-ই refresh হবে।
+        oldest_candidate = None
+        scanned_messages = 0
+        async for msg in client.get_chat_history(channel_id):
+            scanned_messages += 1
+            if msg.date is None or msg.service or msg.empty:
                 continue
 
             caption = msg.caption or msg.text or ""
 
-            # শুক্রবার: শুধু Jumuah পোস্ট Refresh হবে
+            # শুক্রবার: source tag-সহ শুধু Jumuah পোস্ট
             if is_friday:
-                if not is_jumuah(caption):
-                    continue
+                eligible = is_jumuah(caption)
             else:
-                # অন্য দিন: Jumuah পোস্ট বাদ
-                if not is_regular(caption):
-                    continue
+                # অন্য দিন: source tag-সহ non-Jumuah পোস্ট
+                eligible = is_regular(caption)
 
+            if (
+                eligible
+                and (
+                    oldest_candidate is None
+                    or msg.date < oldest_candidate[0].date
+                )
+            ):
+                oldest_candidate = (msg, caption)
+
+        logger.info(
+            f"📋 পুরো channel history scan হয়েছে: {scanned_messages}টি message"
+        )
+
+        # প্রতি scheduled run-এ মাত্র oldest eligible post refresh হবে।
+        # কোনো post-count setting বা history limit নেই।
+        if oldest_candidate is not None:
+            msg, caption = oldest_candidate
             old_id  = msg.id
             preview = caption[:70].replace("\n", " ") if caption else "[media]"
-            logger.info(f"\n  🎯 Refresh: id={old_id} | {preview}")
+            logger.info(f"\n  🎯 Oldest tagged post Refresh: id={old_id} | {preview}")
 
             source_new = None
             try:
@@ -514,7 +537,7 @@ async def run_refresh():
                     f"  ✅ Source channel-এ refreshed copy → new_id={source_new.id}"
                 )
 
-                # শুক্রবারে শুধু #Jumuah, অন্য দিনে শুধু #Islam যোগ হবে।
+                # শুক্রবারে শুধু #Jumah, অন্য দিনে শুধু #Islam যোগ হবে।
                 target_new = await copy_to_target_with_caption(
                     client=client,
                     target_channel_id=target_channel_id,
@@ -531,8 +554,7 @@ async def run_refresh():
                     f"  ❌ দুই channel-এ copy সম্পূর্ণ হয়নি: {copy_err} — "
                     "source old post delete হবে না"
                 )
-                # Target channel-এর message delete করার নীতি বজায় রেখে,
-                # target copy ব্যর্থ হলে শুধু এই run-এর নতুন source copy সরাই।
+                # Target copy ব্যর্থ হলে শুধু এই run-এর নতুন source copy rollback।
                 if source_new is not None:
                     try:
                         await client.delete_messages(channel_id, source_new.id)
@@ -543,22 +565,21 @@ async def run_refresh():
                         logger.error(
                             f"  ❌ source rollback ব্যর্থ: {rollback_err}"
                         )
-                continue
+            else:
+                await asyncio.sleep(1.5)
 
-            await asyncio.sleep(1.5)
+                # copy দুটো সফল হলেই পুরনো post delete
+                try:
+                    await client.delete_messages(channel_id, old_id)
+                    logger.info(f"  🗑️  পুরনো পোস্ট ডিলেট → old_id={old_id}\n")
+                except FloodWait as e:
+                    logger.warning(f"  ⏳ FloodWait {e.value}s...")
+                    await asyncio.sleep(e.value + 1)
+                    await client.delete_messages(channel_id, old_id)
+                except Exception as del_err:
+                    logger.error(f"  ❌ delete ব্যর্থ: {del_err}")
 
-            # পুরনো পোস্ট ডিলেট
-            try:
-                await client.delete_messages(channel_id, old_id)
-                logger.info(f"  🗑️  পুরনো পোস্ট ডিলেট → old_id={old_id}\n")
-            except FloodWait as e:
-                logger.warning(f"  ⏳ FloodWait {e.value}s...")
-                await asyncio.sleep(e.value + 1)
-                await client.delete_messages(channel_id, old_id)
-            except Exception as del_err:
-                logger.error(f"  ❌ delete ব্যর্থ: {del_err}")
-
-            refreshed += 1
+                refreshed += 1
 
         # Scheduled run-এর সঙ্গে target channel-এর pending request approve হবে।
         # ০ দিলে approval বন্ধ থাকবে। Target channel-এর কোনো message এখানে
@@ -613,7 +634,7 @@ def home():
         + f"<br>শুক্রবার Source tags: <b>{' '.join(parse_tags(FRIDAY_SOURCE_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
         + f"<br>Target tags: <b>{' '.join(parse_tags(TARGET_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
         + f"<br>শুক্রবার Target tags: <b>{' '.join(parse_tags(FRIDAY_TARGET_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
-        + f"</p><p>প্রতিবার: <b>{POSTS_PER_RUN}</b>টি পোস্ট</p>"
+        + "</p><p>প্রতিবার: সব পোস্টের মধ্যে সবচেয়ে পুরনো matching/tagged পোস্টটি ১টি Refresh হবে</p>"
     )
 
 def run_flask():
@@ -665,7 +686,7 @@ def _clock_scheduler():
         f"  📢 Target Channel : {TARGET_CHANNEL_ID}\n"
         f"  ⏰ সাধারণ Schedule : {', '.join(regular_labels) or '(কোনো সময় সেট নেই)'}\n"
         f"  🕌 Friday Schedule : {friday_schedule_label}\n"
-        f"  📦 প্রতিবার       : {POSTS_PER_RUN}টি পোস্ট + "
+        f"  📦 প্রতি slot      : oldest matching/tagged post ১টি Refresh + "
         f"{JOIN_REQUESTS_PER_RUN}টি পর্যন্ত join approval\n"
         f"  💡 Account শুধু Refresh-এর সময় active হয়\n"
         f"  🔁 চেক           : প্রতি ৫ সেকেন্ডে BD সময় দেখা হয় "
