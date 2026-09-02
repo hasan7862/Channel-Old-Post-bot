@@ -37,10 +37,10 @@ TARGET_CHANNEL_USERNAME = "Islamic_Stor"
 # একাধিক tag কমা দিয়ে লিখুন — যেমন:
 # "#Alqalam, #Islamic, #Quran"
 # পোস্টে এগুলো একই লাইনে space দিয়ে দেখা যাবে।
-SOURCE_CAPTION_TAGS = "#ALQalambd"
-FRIDAY_SOURCE_CAPTION_TAGS = "#AlQalamBd, #Jumuah_Mubarak"
-TARGET_CAPTION_TAGS = "#IslamicStore"
-FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
+SOURCE_CAPTION_TAGS = "#ALQalambd" #old tag
+FRIDAY_SOURCE_CAPTION_TAGS = "#Jumuah_Mubarak"
+TARGET_CAPTION_TAGS = "#IslamicStore" #post tag
+FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak" #post tag
 
 # ০ দিলে pending join request approval বন্ধ থাকবে।
 JOIN_REQUESTS_PER_RUN = 40
