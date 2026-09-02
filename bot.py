@@ -40,10 +40,10 @@ TARGET_CHANNEL_USERNAME = "Islamic_Stor"
 # সাধারণ দিনের পুরনো পোস্ট খোঁজার tag
 SOURCE_SEARCH_TAGS = "#ALQalamBD"
 # সাধারণ দিনের নতুন refreshed source পোস্টে লেখা হবে এই tag
-SOURCE_CAPTION_TAGS = "#ALQalam365" #source channel tag
+SOURCE_CAPTION_TAGS = "#ALQalam365"
 FRIDAY_SOURCE_CAPTION_TAGS = "#Jumuah_Mubarak"
-TARGET_CAPTION_TAGS = "#IslamicStore" #post tag
-FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak" #post tag
+TARGET_CAPTION_TAGS = "#IslamicStore"
+FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
 # ০ দিলে pending join request approval বন্ধ থাকবে।
 JOIN_REQUESTS_PER_RUN = 40
@@ -61,7 +61,7 @@ SCHEDULE_TIMES = [
       ("11:11", "PM"),
       ("01:11", "AM"),
       ("03:33", "AM"),
-      ("03:25", "PM"),
+      ("10:30", "PM"),
     # ("11:00", "AM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
