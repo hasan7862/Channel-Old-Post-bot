@@ -4,7 +4,7 @@
 ╚══════════════════════════════════════════════════════════════════╝
 
   ✅ নির্ধারিত সময়ে Account connect হয়, কাজ শেষে disconnect।
-     সারাদিন Account active থাকে না।
+     সারাদিন Account active থাকে না
 
   📌 CHANNEL_USERNAME কীভাবে পাবেন?
      Telegram-এ চ্যানেলে যান → Info → Username (t.me/xxxxx)
