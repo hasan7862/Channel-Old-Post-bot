@@ -20,7 +20,7 @@
 # 🔑 Telegram Credentials (https://my.telegram.org)
 API_ID         = 37001641
 API_HASH       = "75aaefa6b305facc4745d25eb1fcf9f4"
-SESSION_STRING = "BQI0makAaOaV435DZ54UwZ9yQyorV7BjDJhMbDkdUepGOwKRaczVDT_IueOC7sG3ZcET39NovSL_Xk4hHGFehcHBaayHwQGioxunMZsbGBxvN4JPP4M0P7Qp_0mpMKD4Lzj8BYbgUPpYL6QpypOTmDc8Q_MEO5QgRjCed90XigP-MSUTDy77CQHfTcC2A6XxweUCASwRprby4bxf7f8PNpLKFx3KFTmvp7wz9v6uScDIJZMeqXqxpw3v9CWqKExp9O9UtHTXVR4po4CTK3OzjUQzRvjan7bq60Kz055y9KPBKs0ksO6bVkypn3nyfY43IdCxWS3rP4ECRv9A3z7R1YRLEnF6wgAAAAHPS6uXAA"
+SESSION_STRING = "1BVtsOIUBuwZrtfzoAdapMlWrh5mI2GnlV2hSsF_3z5XW0uuCTQOmkg28RWOM6z3i02Y4kjh1w-Q47mx4Nq4vC0i7uex0vvsZv0Qzs-QTa38wzI0KO_7RbL9jQqLf6ijVcfGdq7q-Hz8gppwwiVI8iEeaIGueVt1lX_yc1yvo14qL3eGgZyqKIRHExHnTNjM0TUSw3B12zOppwrjAYrxIF5gNmqy1Us7j6QXepjDgYHFaSpvRm3YbIecwYXjB-tAez58wTJVyu7h4oy-g-jfSAzH9s1CO48tCW_B3aRfk7GIT3T2joN562sKiuXt0KVWnIzOqLLK0WjTNKnQ7iCysFCWS9GWG-wM="
 
 # 📢 Channel সনাক্তকরণ
 #    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
