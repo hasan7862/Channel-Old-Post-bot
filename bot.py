@@ -62,7 +62,7 @@ SCHEDULE_TIMES = [
       ("03:45", "AM"),
       ("03:30", "PM"),
       ("12:27", "PM"),
-    # ("11:00", "AM"),
+      ("09:20", "AM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
 ]
@@ -499,18 +499,13 @@ async def run_refresh():
         target_chat = await resolve_target_channel(client)
         target_channel_id = target_chat.id
 
-        # Pyrogram history newest → oldest আসে। কোনো limit না দিয়ে পুরো
-        # history scan করি, কিন্তু সব message list-এ জমাই না। ফলে channel-এ
-        # ২০০, ২০০০ বা তারও বেশি post থাকলেও memory অযথা বাড়ে না।
-        #
-        # scan চলাকালে date compare করে সবচেয়ে পুরনো eligible candidate রাখি।
-        # ফলে API history order বদলালেও সঠিক oldest post-ই refresh হবে।
+        # Pyrogram history newest → oldest আসে।
+        # তাই প্রতিটি matching post-এ candidate replace করতে থাকলে
+        # scan শেষে সবচেয়ে পুরনো matching post-টাই থাকবে।
+        # এইভাবেই A → B → C serial refresh চলবে।
         oldest_candidate = None
-        oldest_legacy_candidate = None
-        oldest_current_candidate = None
-        scanned_messages = 0
+        matched_kind = None
         async for msg in client.get_chat_history(channel_id):
-            scanned_messages += 1
             if msg.date is None or msg.service or msg.empty:
                 continue
 
@@ -519,53 +514,39 @@ async def run_refresh():
             # শুক্রবার: source tag-সহ শুধু Jumuah পোস্ট
             if is_friday:
                 eligible = is_jumuah(caption)
-                if (
-                    eligible
-                    and (
-                        oldest_candidate is None
-                        or msg.date < oldest_candidate[0].date
-                    )
-                ):
+                if eligible:
                     oldest_candidate = (msg, caption)
+                    matched_kind = "Friday/Jumuah"
             else:
-                # অন্য দিন:
-                # ১) আগে পুরনো #ALQalamBD পোস্ট শেষ করবে।
-                # ২) পুরনো tag-এর পোস্ট শেষ হলে #ALQalam365 fallback হবে।
+                # অন্য দিন: সব matching source-tagged post-এর মধ্যে
+                # সবচেয়ে পুরনোটি রাখো।
                 eligible = is_regular(caption)
-                if eligible and has_source_search_tag(caption):
-                    if (
-                        oldest_legacy_candidate is None
-                        or msg.date < oldest_legacy_candidate[0].date
-                    ):
-                        oldest_legacy_candidate = (msg, caption)
-                elif eligible and has_current_source_tag(caption):
-                    if (
-                        oldest_current_candidate is None
-                        or msg.date < oldest_current_candidate[0].date
-                    ):
-                        oldest_current_candidate = (msg, caption)
-
-        if not is_friday:
-            # Legacy #ALQalamBD থাকলে সেটিই priority পাবে;
-            # না থাকলেই নতুন #ALQalam365 পোস্টে যাবে।
-            oldest_candidate = (
-                oldest_legacy_candidate
-                or oldest_current_candidate
-            )
+                if eligible:
+                    oldest_candidate = (msg, caption)
+                    if has_source_search_tag(caption):
+                        matched_kind = "legacy source tag"
+                    elif has_current_source_tag(caption):
+                        matched_kind = "current source tag"
+                    else:
+                        matched_kind = "source tag"
 
         logger.info(
-            f"📋 পুরো channel history scan হয়েছে: {scanned_messages}টি message"
+            f"📋 {'সবচেয়ে পুরনো matching post নির্বাচিত হয়েছে' if oldest_candidate else 'কোনো matching post পাওয়া যায়নি'}"
         )
 
-        # প্রতি scheduled run-এ মাত্র oldest eligible post refresh হবে।
-        # কোনো post-count setting বা history limit নেই।
+        # প্রতি scheduled run-এ সবচেয়ে পুরনো eligible post refresh হবে।
+        # Copy দুটো সফল হলে শুধু তার পুরনো source post delete হবে।
         if oldest_candidate is not None:
             msg, caption = oldest_candidate
             old_id  = msg.id
             preview = caption[:70].replace("\n", " ") if caption else "[media]"
-            logger.info(f"\n  🎯 Oldest tagged post Refresh: id={old_id} | {preview}")
+            logger.info(
+                f"\n  🎯 সবচেয়ে পুরনো tagged post Refresh: "
+                f"id={old_id} | tag={matched_kind} | {preview}"
+            )
 
             source_new = None
+            copy_stage = "source"
             try:
                 # আগে source copy সফল করি, তারপর target-এ আলাদা caption সহ
                 # নতুন post করি। এতে source protected হলে target-এ orphan post
@@ -581,6 +562,7 @@ async def run_refresh():
                 )
 
                 # শুক্রবারে শুধু #Jumah, অন্য দিনে শুধু #Islam যোগ হবে।
+                copy_stage = "target"
                 target_new = await copy_to_target_with_caption(
                     client=client,
                     target_channel_id=target_channel_id,
@@ -594,7 +576,8 @@ async def run_refresh():
 
             except Exception as copy_err:
                 logger.error(
-                    f"  ❌ দুই channel-এ copy সম্পূর্ণ হয়নি: {copy_err} — "
+                    f"  ❌ {copy_stage} copy ব্যর্থ: "
+                    f"{type(copy_err).__name__}: {copy_err!r} — "
                     "source old post delete হবে না"
                 )
                 # Target copy ব্যর্থ হলে শুধু এই run-এর নতুন source copy rollback।
@@ -625,6 +608,8 @@ async def run_refresh():
                 refreshed += 1
 
         # Scheduled run-এর সঙ্গে target channel-এর pending request approve হবে।
+        # Post refresh সফল/ব্যর্থ—দুই অবস্থাতেই approval আলাদাভাবে চলবে।
+        # তাই approval log দেখা মানেই post copy সফল হয়েছে—এমন নয়।
         # ০ দিলে approval বন্ধ থাকবে। Target channel-এর কোনো message এখানে
         # delete করা হয় না।
         if JOIN_REQUESTS_PER_RUN > 0:
@@ -636,7 +621,9 @@ async def run_refresh():
             if is_friday:
                 logger.info("  ℹ️  শুক্রবার: #ALQalamBD + #Jumuah পোস্ট পাওয়া যায়নি")
             else:
-                logger.info("  ℹ️  Refresh-যোগ্য পোস্ট পাওয়া যায়নি")
+                logger.info(
+                    "  ℹ️  Refresh-যোগ্য পোস্ট পাওয়া যায়নি বা copy ব্যর্থ হয়েছে"
+                )
 
     except FloodWait as e:
         logger.warning(f"⏳ FloodWait {e.value}s — পরবর্তী সময়ে চেষ্টা হবে")
