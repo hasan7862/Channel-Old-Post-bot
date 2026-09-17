@@ -24,7 +24,7 @@ SESSION_STRING = "BQIIe4IACV5OFLbJbrFHblh0B_FxkoHnRqpRbA0DmRrA60bXiRSSfjDNdx_Ome
 
 # 📢 Channel সনাক্তকরণ
 #    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
-CHANNEL_USERNAME = "ALQalamBD"          # অথবা "" ফাঁকা রাখুন
+CHANNEL_USERNAME = "ALQalam365"          # অথবা "" ফাঁকা রাখুন
 CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
 # 📢 দ্বিতীয় চ্যানেল — এখানে নতুন copy পোস্ট হবে
@@ -62,7 +62,7 @@ SCHEDULE_TIMES = [
       ("03:45", "AM"),
       ("03:30", "PM"),
       ("12:27", "PM"),
-      ("09:20", "AM"),
+      ("09:26", "AM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
 ]
