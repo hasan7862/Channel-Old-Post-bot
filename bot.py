@@ -46,7 +46,7 @@ TARGET_CAPTION_TAGS = "#IslamicStore"
 FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
 # ০ দিলে pending join request approval বন্ধ থাকবে।
-JOIN_REQUESTS_PER_RUN = 40
+JOIN_REQUESTS_PER_RUN = 50
 
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
 #
@@ -61,8 +61,8 @@ SCHEDULE_TIMES = [
       ("10:45", "PM"),
       ("12:45", "AM"),
       ("03:45", "AM"),
+      ("11:11", "AM"),
       ("03:45", "PM"),
-    # ("09:26", "AM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
 ]
