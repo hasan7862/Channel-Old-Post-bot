@@ -28,7 +28,8 @@ CHANNEL_USERNAME = "ALQalam365"          # অথবা "" ফাঁকা র�
 CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
 # 📢 দ্বিতীয় চ্যানেল — এখানে নতুন copy পোস্ট হবে
-# এই চ্যানেলের কোনো message delete করা হবে না।
+# Target-এ শুক্রবারের নতুন post সফল হওয়ার পর আগের দিনের Jumuah-tagged post মুছবে;
+# target-এর অন্য message এবং আজকের শুক্রবারের post অক্ষত থাকবে।
 TARGET_CHANNEL_ID = -1003704917412
 # Username দিলে Telegram peer আগে থেকেই resolve করতে পারে; ID fallback হিসেবে থাকবে।
 TARGET_CHANNEL_USERNAME = "Islamic_Stor"
@@ -466,6 +467,131 @@ async def copy_to_source_with_caption(
     )
 
 
+async def delete_previous_friday_target_posts(
+    client: Client,
+    target_channel_id: int,
+    current_friday,
+    keep_message_ids=None,
+) -> int:
+    """
+    Target channel থেকে শুধু আজকের আগের দিনের Friday-tagged post মুছে।
+    Friday tags exact hashtag হিসেবে মিলবে; আজকের post ও অন্য tag-এর post থাকবে।
+    """
+    friday_tags = {
+        tag.casefold() for tag in parse_tags(FRIDAY_TARGET_CAPTION_TAGS)
+    }
+    if not friday_tags:
+        logger.warning(
+            "শুক্রবারের target tag সেট নেই — পুরনো Friday post delete করা হয়নি"
+        )
+        return 0
+
+    keep_message_ids = set(keep_message_ids or ())
+    hashtag_pattern = re.compile(r"(?<![\w])#[\w]+", flags=re.UNICODE)
+    old_message_ids = []
+
+    try:
+        async for msg in client.get_chat_history(target_channel_id):
+            if (
+                msg.date is None
+                or getattr(msg, "service", False)
+                or getattr(msg, "empty", False)
+                or msg.id in keep_message_ids
+            ):
+                continue
+
+            msg_date = msg.date
+            if msg_date.tzinfo is None:
+                msg_date = pytz.UTC.localize(msg_date)
+            if msg_date.astimezone(DHAKA_TZ).date() >= current_friday:
+                continue
+
+            text = msg.caption or msg.text or ""
+            message_tags = {
+                tag.casefold() for tag in hashtag_pattern.findall(text)
+            }
+            if message_tags & friday_tags:
+                old_message_ids.append(msg.id)
+    except Exception as scan_err:
+        logger.error(
+            f"Target-এর পুরনো Friday post খোঁজা যায়নি: "
+            f"{type(scan_err).__name__}: {scan_err}"
+        )
+        return 0
+
+    if not old_message_ids:
+        logger.info("Target-এ আগের দিনের কোনো Friday-tagged post পাওয়া যায়নি")
+        return 0
+
+    deleted_count = 0
+    # Telegram bulk delete-এ ছোট batch ব্যবহার করি; কোনো batch ব্যর্থ হলে
+    # বাকি ID-গুলো এককভাবে চেষ্টা করা হবে।
+    for start in range(0, len(old_message_ids), 100):
+        batch = old_message_ids[start:start + 100]
+        try:
+            result = await client.delete_messages(target_channel_id, batch)
+            deleted_count += int(result or 0)
+            logger.info(
+                f"Target-এর পুরনো Friday post delete: "
+                f"{len(batch)}টি ID, Telegram result={result}"
+            )
+            continue
+        except FloodWait as e:
+            logger.warning(f"Friday post delete FloodWait {e.value}s")
+            await asyncio.sleep(e.value + 1)
+            try:
+                result = await client.delete_messages(target_channel_id, batch)
+                deleted_count += int(result or 0)
+                logger.info(
+                    f"FloodWait-এর পর target Friday post delete: "
+                    f"{len(batch)}টি ID, Telegram result={result}"
+                )
+                continue
+            except Exception as retry_err:
+                logger.warning(
+                    f"Batch retry ব্যর্থ; এককভাবে delete চেষ্টা হবে: {retry_err}"
+                )
+        except Exception as batch_err:
+            logger.warning(
+                f"Friday post batch delete ব্যর্থ; এককভাবে চেষ্টা হবে: {batch_err}"
+            )
+
+        for message_id in batch:
+            try:
+                result = await client.delete_messages(
+                    target_channel_id, message_id
+                )
+                deleted_count += int(result or 0)
+            except FloodWait as e:
+                logger.warning(
+                    f"একটি Friday post delete FloodWait {e.value}s; অপেক্ষা করে retry"
+                )
+                await asyncio.sleep(e.value + 1)
+                try:
+                    result = await client.delete_messages(
+                        target_channel_id, message_id
+                    )
+                    deleted_count += int(result or 0)
+                except Exception as retry_err:
+                    logger.warning(
+                        f"Target message {message_id} delete retry ব্যর্থ: {retry_err}"
+                    )
+            except (MessageDeleteForbidden, MessageIdInvalid) as delete_err:
+                logger.warning(
+                    f"Target message {message_id} delete করা যায়নি: {delete_err}"
+                )
+            except Exception as delete_err:
+                logger.warning(
+                    f"Target message {message_id} delete ব্যর্থ: {delete_err}"
+                )
+
+    logger.info(
+        f"Target-এর আগের Friday-tagged post delete সম্পন্ন: "
+        f"{deleted_count}/{len(old_message_ids)}"
+    )
+    return deleted_count
+
+
 # ── একটি Refresh চক্র: connect → কাজ → disconnect ─────────────────
 async def run_refresh():
     now       = datetime.now(DHAKA_TZ)
@@ -574,6 +700,20 @@ async def run_refresh():
                     f"  ✅ Target channel-এ নতুন পোস্ট → new_id={target_new.id}"
                 )
 
+                # Friday target copy সফল হওয়ার পরেই আগের সপ্তাহ(গুলো)র
+                # Jumuah-tagged target post মুছি; send ব্যর্থ হলে পুরনো post থাকবে।
+                if is_friday:
+                    deleted_friday_posts = await delete_previous_friday_target_posts(
+                        client=client,
+                        target_channel_id=target_channel_id,
+                        current_friday=now.astimezone(DHAKA_TZ).date(),
+                        keep_message_ids={target_new.id},
+                    )
+                    logger.info(
+                        f"  🕌 Target-এর পুরনো Friday post মুছেছে: "
+                        f"{deleted_friday_posts}টি"
+                    )
+
             except Exception as copy_err:
                 logger.error(
                     f"  ❌ {copy_stage} copy ব্যর্থ: "
@@ -610,8 +750,8 @@ async def run_refresh():
         # Scheduled run-এর সঙ্গে target channel-এর pending request approve হবে।
         # Post refresh সফল/ব্যর্থ—দুই অবস্থাতেই approval আলাদাভাবে চলবে।
         # তাই approval log দেখা মানেই post copy সফল হয়েছে—এমন নয়।
-        # ০ দিলে approval বন্ধ থাকবে। Target channel-এর কোনো message এখানে
-        # delete করা হয় না।
+        # ০ দিলে approval বন্ধ থাকবে। Friday-tagged পুরনো target post cleanup
+        # শুধু উপরের Friday target-copy সফল হওয়ার পর চলে।
         if JOIN_REQUESTS_PER_RUN > 0:
             await approve_target_join_requests(client, target_channel_id)
         else:
@@ -664,7 +804,8 @@ def home():
         + f"<br>শুক্রবার Source tags: <b>{' '.join(parse_tags(FRIDAY_SOURCE_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
         + f"<br>Target tags: <b>{' '.join(parse_tags(TARGET_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
         + f"<br>শুক্রবার Target tags: <b>{' '.join(parse_tags(FRIDAY_TARGET_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
-        + "</p><p>প্রতিবার: সব পোস্টের মধ্যে সবচেয়ে পুরনো matching/tagged পোস্টটি ১টি Refresh হবে</p>"
+        + "</p><p>শুক্রবার নতুন target post সফল হলে, আজকের আগের তারিখের Friday-tagged target post-গুলো মুছবে; আজকের post ও অন্য post থাকবে।</p>"
+        + "<p>প্রতিবার: সব পোস্টের মধ্যে সবচেয়ে পুরনো matching/tagged পোস্টটি ১টি Refresh হবে</p>"
     )
 
 def run_flask():
