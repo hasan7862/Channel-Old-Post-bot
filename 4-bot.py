@@ -27,7 +27,7 @@ SESSION_STRING = "BQIIe4IACV5OFLbJbrFHblh0B_FxkoHnRqpRbA0DmRrA60bXiRSSfjDNdx_Ome
 CHANNEL_USERNAME = "ALQalam365"          # অথবা "" ফাঁকা রাখুন
 CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
-# 📢 দ্বিতীয় চ্যানেল — এখানে নতুন copy পোস্ট হবে
+# 📢 দ্বিতীয় চ্যানেল — এখানে নতুন copy পোস্ট হবে
 # Target-এ শুক্রবারের নতুন post সফল হওয়ার পর আগের দিনের Jumuah-tagged post মুছবে;
 # target-এর অন্য message এবং আজকের শুক্রবারের post অক্ষত থাকবে।
 TARGET_CHANNEL_ID = -1003704917412
@@ -41,9 +41,9 @@ TARGET_CHANNEL_USERNAME = "Islamic_Stor"
 # সাধারণ দিনের পুরনো পোস্ট খোঁজার tag
 SOURCE_SEARCH_TAGS = "#ALQalamBD"
 # সাধারণ দিনের নতুন refreshed source পোস্টে লেখা হবে এই tag
-SOURCE_CAPTION_TAGS = "#ALQalam365 , @AlQalam365"
+SOURCE_CAPTION_TAGS = "#ALQalam365"
 FRIDAY_SOURCE_CAPTION_TAGS = "#Jumuah_Mubarak"
-TARGET_CAPTION_TAGS = "#IslamicStore , @AlQalam365"
+TARGET_CAPTION_TAGS = "#IslamicStore"
 FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
 # ০ দিলে pending join request approval বন্ধ থাকবে।
@@ -60,7 +60,7 @@ JOIN_REQUESTS_PER_RUN = 60
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
       ("12:00", "AM"),
-      ("12:20", "PM"),
+    # ("12:45", "AM"),
     # ("03:45", "AM"),
     # ("11:11", "AM"),
     # ("03:45", "PM"),
@@ -166,23 +166,14 @@ def format_schedule(schedule_times) -> list:
 
 
 def parse_tags(tag_text: str) -> list:
-    """কমা বা space-separated tag config-কে unique tag list-এ পরিণত করে।
-
-    নিয়ম:
-      - ইতিমধ্যে # বা @ দিয়ে শুরু হলে অপরিবর্তিত রাখে
-      - সাধারণ শব্দ হলে # প্রিফিক্স যোগ করে
-      - @ দিয়ে শুরু হওয়া mention-এ কখনোই # যোগ হবে না
-    """
+    """কমা বা space-separated tag config-কে unique tag list-এ পরিণত করে।"""
     tags = []
     seen = set()
     for raw in re.split(r"[,\s]+", tag_text or ""):
         tag = raw.strip()
         if not tag:
             continue
-        # @ mention হলে # যোগ করব না
-        if tag.startswith("@"):
-            pass
-        elif not tag.startswith("#"):
+        if not tag.startswith("#"):
             tag = f"#{tag}"
         key = tag.casefold()
         if key not in seen:
