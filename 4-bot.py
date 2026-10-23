@@ -41,13 +41,13 @@ TARGET_CHANNEL_USERNAME = "Islamic_Stor"
 # সাধারণ দিনের পুরনো পোস্ট খোঁজার tag
 SOURCE_SEARCH_TAGS = "#ALQalamBD"
 # সাধারণ দিনের নতুন refreshed source পোস্টে লেখা হবে এই tag
-SOURCE_CAPTION_TAGS = "#ALQalam365"
+SOURCE_CAPTION_TAGS = "#ALQalam365 , @AlQalam365"
 FRIDAY_SOURCE_CAPTION_TAGS = "#Jumuah_Mubarak"
-TARGET_CAPTION_TAGS = "#IslamicStore"
+TARGET_CAPTION_TAGS = "#IslamicStore , @AlQalam365"
 FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
 # ০ দিলে pending join request approval বন্ধ থাকবে।
-JOIN_REQUESTS_PER_RUN = 50
+JOIN_REQUESTS_PER_RUN = 60
 
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
 #
@@ -59,9 +59,9 @@ JOIN_REQUESTS_PER_RUN = 50
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
 SCHEDULE_TIMES = [
-    # ("10:45", "PM"),
+      ("12:00", "AM"),
     # ("12:45", "AM"),
-      ("03:45", "AM"),
+    # ("03:45", "AM"),
     # ("11:11", "AM"),
     # ("03:45", "PM"),
     # ("04:30", "PM"),
@@ -77,11 +77,11 @@ SCHEDULE_TIMES = [
 #    SCHEDULE_TIMES-এর সময়ে Jumuah পোস্ট Refresh হবে।
 # ---------------------------------------------------------------
 FRIDAY_SCHEDULE_TIMES = [
-      # ("12:00", "AM"),
+        ("12:00", "AM"),
       # ("03:45", "AM"),
         ("08:30", "AM"),
       # ("11:45", "AM"),
-      # ("01:15", "PM"),
+        ("01:15", "PM"),
 ]
 
 # 📦 Refresh policy
