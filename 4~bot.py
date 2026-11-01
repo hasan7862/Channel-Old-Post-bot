@@ -36,9 +36,9 @@ TARGET_CHANNELS = [
     {
         "name": "Target 1",
         "username": "Islamic_Stor",
+        "auto_username_tags": True,
         "id": -1003704917412,
-        "caption_tags": "#IslamicStore",
-        "friday_caption_tags": "#Jumuah_Mubarak",
+        "legacy_search_tags": "#IslamicStore",  # পুরনো post খোঁজার জন্য; নতুন caption-এ যাবে না
         "schedule_times": None,          # None = SCHEDULE_TIMES ব্যবহার
         "friday_schedule_times": None,  # None = FRIDAY_SCHEDULE_TIMES ব্যবহার
         "approval_enabled": True,
@@ -50,8 +50,7 @@ TARGET_CHANNELS = [
     #     "name": "Target 2",
     #     "username": "YOUR_TARGET_2_USERNAME",
     #     "id": -1001234567890,
-    #     "caption_tags": "#Target2Tag",
-    #     "friday_caption_tags": "#Jumuah_Mubarak",
+    #     "auto_username_tags": True,  # resolved chat-এর actual username থেকে tag
     #     "schedule_times": [("06:00", "PM")],
     #     "friday_schedule_times": [("07:00", "PM")],
     #     "approval_enabled": False,
@@ -59,17 +58,14 @@ TARGET_CHANNELS = [
     # },
 ]
 
-# 🏷️ Source এবং Target caption tags
-# একাধিক tag কমা দিয়ে লিখুন — যেমন:
-# "#Alqalam, #Islamic, #Quran"
-# পোস্টে এগুলো একই লাইনে space দিয়ে দেখা যাবে।
-# সাধারণ দিনের পুরনো পোস্ট খোঁজার tag
+# 🏷️ Channel tag automation
+# নতুন caption-এর hashtag/@username প্রতিবার Telegram থেকে resolved actual
+# channel username দেখে তৈরি হবে; নিচে আলাদা tag name লেখার দরকার নেই।
+# Legacy search tag শুধু পুরনো Source posts খুঁজতে ব্যবহৃত হয়; নতুন caption-এ যায় না।
 SOURCE_SEARCH_TAGS = "#ALQalamBD"
-# সাধারণ দিনের নতুন refreshed source পোস্টে লেখা হবে এই tag
-SOURCE_CAPTION_TAGS = "#ALQalam365"
+SOURCE_CAPTION_TAGS = ""
+# Friday marker chain-এর Friday post চিনতে সাহায্য করে; এটি channel handle নয়।
 FRIDAY_SOURCE_CAPTION_TAGS = "#Jumuah_Mubarak"
-TARGET_CAPTION_TAGS = "#IslamicStore"
-FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
 # JOIN_REQUESTS_PER_RUN হলো channel-specific limit না দিলে ব্যবহৃত legacy default;
 # approval_enabled=True/False দিয়ে প্রতিটি target-এর approval চালু/বন্ধ করুন।
@@ -89,8 +85,8 @@ JOIN_REQUESTS_PER_RUN = 60
 SCHEDULE_TIMES = [
       ("12:00", "AM"),
       ("03:45", "AM"),
-    # ("03:45", "AM"),
-      ("09:05", "AM"),
+      ("09:45", "AM"),
+    # ("11:11", "AM"),
     # ("03:45", "PM"),
     # ("04:30", "PM"),
     # ("11:00", "PM"),
@@ -124,6 +120,7 @@ FRIDAY_SCHEDULE_TIMES = [
 
 import asyncio
 import logging
+import json
 import os
 import re
 import pytz
@@ -150,8 +147,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DHAKA_TZ    = pytz.timezone("Asia/Dhaka")
-CHANNEL_TAG = "#alqalambd"
 JUMUAH_TAGS = {"#jumuah", "#jumah"}
+# এই file-টি deploy/restart-এর পরও রেখে দিন; এতে আগের channel usernames থাকে।
+_USERNAME_HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "channel_username_history.json"
+)
 
 
 # ── AM/PM → 24-hour ────────────────────────────────────────────────
@@ -231,44 +231,6 @@ def caption_with_tags(caption: str, tag_config: str) -> str:
     if base and paired_tags:
         return f"{base}\n\n{paired_tags}"
     return base or paired_tags
-
-
-def is_jumuah(caption: str) -> bool:
-    c = (caption or "").lower()
-    return any(tag in c for tag in JUMUAH_TAGS) and has_source_tag(c)
-
-def has_source_tag(caption: str) -> bool:
-    c = (caption or "").lower()
-    source_markers = {
-        CHANNEL_TAG,
-        *(tag.lower() for tag in parse_tags(SOURCE_SEARCH_TAGS)),
-        *(tag.lower() for tag in parse_tags(SOURCE_CAPTION_TAGS)),
-        *(tag.lower() for tag in parse_tags(FRIDAY_SOURCE_CAPTION_TAGS)),
-    }
-    return any(tag in c for tag in source_markers)
-
-def has_source_search_tag(caption: str) -> bool:
-    """সাধারণ দিনের legacy source tag আছে কি না দেখে।"""
-    c = (caption or "").lower()
-    return any(
-        tag.lower() in c
-        for tag in parse_tags(SOURCE_SEARCH_TAGS)
-    )
-
-def has_current_source_tag(caption: str) -> bool:
-    """সাধারণ দিনের নতুন source tag আছে কি না দেখে।"""
-    c = (caption or "").lower()
-    return any(
-        tag.lower() in c
-        for tag in parse_tags(SOURCE_CAPTION_TAGS)
-    )
-
-def is_regular(caption: str) -> bool:
-    c = (caption or "").lower()
-    return (
-        has_source_tag(c)
-        and not any(tag in c for tag in JUMUAH_TAGS)
-    )
 
 
 # ── Fired-slot tracker (restart-proof) ────────────────────────────
@@ -355,43 +317,81 @@ def _scheduled_slot_for(now, schedule_times):
 
 # ── Channel peer resolve (username → ID cache) ─────────────────────
 async def resolve_channel(client: Client) -> int:
-    """Channel-এর resolved ID ফেরত দেয়। Username থাকলে সেটা ব্যবহার করে,
-    না থাকলে dialogs খুঁজে CHANNEL_ID match করে।"""
+    """Channel ID-কে স্থায়ী identity ধরে username resolve/fallback করে।"""
     if CHANNEL_USERNAME:
         try:
             chat = await client.get_chat(CHANNEL_USERNAME)
-            logger.info(f"📢 Channel: {chat.title} (id={chat.id})")
-            return chat.id
+            if CHANNEL_ID is None or int(chat.id) == int(CHANNEL_ID):
+                logger.info(f"📢 Source: {chat.title} (id={chat.id})")
+                return chat.id
+            logger.warning(
+                f"⚠️ Configured Source username এখন অন্য chat-এ resolve হয়েছে "
+                f"(id={chat.id}); নিরাপত্তার জন্য ID={CHANNEL_ID} fallback হবে"
+            )
         except Exception as e:
-            logger.warning(f"⚠️  Username দিয়ে resolve হয়নি: {e} — dialog search চেষ্টা করছি...")
+            logger.warning(f"⚠️ Source username resolve হয়নি: {e} — ID fallback চেষ্টা করছি...")
 
-    # Fallback: dialogs থেকে খোঁজা
     async for dialog in client.get_dialogs():
-        if dialog.chat.id == CHANNEL_ID:
-            logger.info(f"📢 Channel dialog থেকে পাওয়া: {dialog.chat.title}")
+        if CHANNEL_ID is not None and int(dialog.chat.id) == int(CHANNEL_ID):
+            logger.info(f"📢 Source ID থেকে পাওয়া: {dialog.chat.title}")
             return dialog.chat.id
-    raise RuntimeError(f"Channel পাওয়া যায়নি (ID={CHANNEL_ID}, Username={CHANNEL_USERNAME})")
+    raise RuntimeError(f"Source channel পাওয়া যায়নি (ID={CHANNEL_ID}, Username={CHANNEL_USERNAME})")
 
 
 async def resolve_configured_channel(client: Client, channel_config: dict):
-    """Username আগে, পরে ID দিয়ে যেকোনো chain channel resolve করে।"""
+    """Configured ID verify করে; username বদলালে dialog ID দিয়ে channel খুঁজে।"""
     username = (channel_config.get("username") or "").strip().lstrip("@")
     channel_id = channel_config.get("id")
     if username:
         try:
             chat = await client.get_chat(username)
-            logger.info(f"📢 {channel_config.get('name', 'Channel')}: {chat.title} (id={chat.id})")
-            return chat
+            if channel_id is None or int(chat.id) == int(channel_id):
+                logger.info(f"📢 {channel_config.get('name', 'Channel')}: {chat.title} (id={chat.id})")
+                return chat
+            logger.warning(
+                f"⚠️ {channel_config.get('name', 'Channel')} username অন্য chat-এ গেছে "
+                f"(id={chat.id}); ID={channel_id} দিয়ে resolve হবে"
+            )
         except Exception as e:
             logger.warning(f"⚠️ {channel_config.get('name', 'Channel')} username resolve হয়নি: {e}")
     async for dialog in client.get_dialogs():
-        if channel_id is not None and dialog.chat.id == int(channel_id):
-            logger.info(f"📢 {channel_config.get('name', 'Channel')} dialog থেকে পাওয়া: {dialog.chat.title}")
+        if channel_id is not None and int(dialog.chat.id) == int(channel_id):
+            logger.info(f"📢 {channel_config.get('name', 'Channel')} ID থেকে পাওয়া: {dialog.chat.title}")
             return dialog.chat
     raise RuntimeError(
-        f"Channel পাওয়া যায়নি ({channel_config.get('name')}, "
-        f"ID={channel_id}, Username={username})"
+        f"Channel পাওয়া যায়নি ({channel_config.get('name')}, ID={channel_id}, Username={username})"
     )
+
+
+def remember_channel_usernames(chat, configured_username: str = None) -> list:
+    """Stable chat ID অনুযায়ী configured, previous ও current usernames সংরক্ষণ করে."""
+    chat_key = str(int(chat.id))
+    history = {}
+    try:
+        with open(_USERNAME_HISTORY_FILE, encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                history = loaded
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning(f"⚠️ Username history পড়া যায়নি: {e}")
+
+    names = list(history.get(chat_key, []))
+    for value in (configured_username, getattr(chat, "username", None)):
+        name = (value or "").strip().lstrip("@")
+        if name and re.fullmatch(r"[A-Za-z0-9_]+", name) and name not in names:
+            names.append(name)
+    names = names[-20:]
+    history[chat_key] = names
+    try:
+        temp_path = _USERNAME_HISTORY_FILE + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, _USERNAME_HISTORY_FILE)
+    except Exception as e:
+        logger.warning(f"⚠️ Username history সেভ হয়নি: {e}")
+    return names
 
 
 async def approve_target_join_requests(client: Client, target_channel_id: int, limit: int) -> int:
@@ -437,16 +437,13 @@ async def approve_target_join_requests(client: Client, target_channel_id: int, l
     return approved
 
 
-def channel_caption(caption: str, channel_config: dict, is_friday: bool) -> str:
-    tag_config = (
-        channel_config.get("friday_caption_tags", "")
-        if is_friday else channel_config.get("caption_tags", "")
-    )
-    return caption_with_tags(caption, tag_config)
-
-
-
-def channel_tag_config(channel_config: dict, is_friday: bool) -> str:
+def channel_tag_config(
+    channel_config: dict, is_friday: bool, actual_username: str = None
+) -> str:
+    """Resolved Telegram username-কে এই channel-এর hashtag হিসেবে ফেরত দেয়."""
+    username = (actual_username or "").strip().lstrip("@")
+    if channel_config.get("auto_username_tags", True) and re.fullmatch(r"[A-Za-z0-9_]+", username):
+        return f"#{username}"
     if channel_config.get("is_source"):
         return FRIDAY_SOURCE_CAPTION_TAGS if is_friday else SOURCE_CAPTION_TAGS
     return (
@@ -455,40 +452,92 @@ def channel_tag_config(channel_config: dict, is_friday: bool) -> str:
     )
 
 
-def bold_tag_entities(caption: str, tag_config: str) -> list:
-    """শুধু appended #Tag , @Tag অংশটিকে Telegram bold entity করে।"""
-    base = caption_without_tags(caption)
-    paired_tags = " ".join(
-        f"{tag} , @{tag[1:]}" for tag in parse_tags(tag_config)
+def _utf16_length(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def channel_caption_payload(
+    caption: str,
+    channel_config: dict,
+    is_friday: bool,
+    actual_username: str = None,
+):
+    """Caption text এবং শুধু channel handle pair-এর bold entity তৈরি করে."""
+    username = (actual_username or "").strip().lstrip("@")
+    auto_handle = bool(
+        channel_config.get("auto_username_tags", True)
+        and re.fullmatch(r"[A-Za-z0-9_]+", username)
     )
-    if not paired_tags:
+    tag_config = channel_tag_config(channel_config, is_friday, username)
+    pairs = [f"{tag} , @{tag[1:]}" for tag in parse_tags(tag_config)]
+    pair_text = " ".join(pairs)
+    marker_tags = []
+    if is_friday and auto_handle:
+        marker_config = channel_config.get(
+            "friday_marker_tags", FRIDAY_SOURCE_CAPTION_TAGS
+        )
+        marker_tags = parse_tags(marker_config)
+
+    base = caption_without_tags(caption)
+    body_parts = marker_tags + ([pair_text] if pair_text else [])
+    body = " ".join(body_parts)
+    prefix = base + ("\n\n" if base and body else "")
+    rendered = prefix + body
+
+    entities = []
+    if pair_text:
+        bold_prefix = prefix
+        if marker_tags:
+            bold_prefix += " ".join(marker_tags) + " "
+        entities.append(MessageEntity(
+            type=enums.MessageEntityType.BOLD,
+            offset=_utf16_length(bold_prefix),
+            length=_utf16_length(pair_text),
+        ))
+    return rendered, entities
+
+
+def channel_caption(caption: str, channel_config: dict, is_friday: bool) -> str:
+    """Compatibility helper; scheduled posts use channel_caption_payload."""
+    text, _ = channel_caption_payload(caption, channel_config, is_friday)
+    return text
+
+
+def bold_tag_entities(caption: str, tag_config: str) -> list:
+    """Legacy helper; offset is correct whether or not the caption has body text."""
+    base = caption_without_tags(caption)
+    pairs = " ".join(f"{tag} , @{tag[1:]}" for tag in parse_tags(tag_config))
+    if not pairs:
         return []
-
-    def utf16_length(value: str) -> int:
-        return len(value.encode("utf-16-le")) // 2
-
+    prefix = base + ("\n\n" if base else "")
     return [MessageEntity(
         type=enums.MessageEntityType.BOLD,
-        offset=utf16_length(base + "\n\n"),
-        length=utf16_length(paired_tags),
+        offset=_utf16_length(prefix),
+        length=_utf16_length(pairs),
     )]
 
-def source_caption(caption: str, is_friday: bool) -> str:
-    tag_config = FRIDAY_SOURCE_CAPTION_TAGS if is_friday else SOURCE_CAPTION_TAGS
-    return caption_with_tags(caption, tag_config)
 
-
-def configured_search_tags(channel_config: dict, is_friday: bool) -> list:
-    """এই channel-এর post পরের chain ধাপে খুঁজতে যেসব tag ব্যবহার হবে।"""
+def configured_search_tags(
+    channel_config: dict, is_friday: bool, actual_username: str = None,
+    known_usernames=None,
+) -> list:
+    """Channel-এর বর্তমান username tag ও প্রয়োজনীয় legacy marker মিলিয়ে দেয়."""
+    values = []
+    username = (actual_username or "").strip().lstrip("@")
+    if re.fullmatch(r"[A-Za-z0-9_]+", username):
+        values.append(f"#{username}")
+    for old_name in known_usernames or []:
+        if re.fullmatch(r"[A-Za-z0-9_]+", old_name):
+            values.append(f"#{old_name}")
     if channel_config.get("is_source"):
-        values = [SOURCE_SEARCH_TAGS, SOURCE_CAPTION_TAGS, FRIDAY_SOURCE_CAPTION_TAGS]
-        if is_friday:
-            values.append(FRIDAY_SOURCE_CAPTION_TAGS)
+        values.extend([SOURCE_SEARCH_TAGS, FRIDAY_SOURCE_CAPTION_TAGS if is_friday else ""])
     else:
-        field = "friday_search_tags" if is_friday else "search_tags"
-        values = [channel_config.get(field, "")]
-        caption_field = "friday_caption_tags" if is_friday else "caption_tags"
-        values.append(channel_config.get(caption_field, ""))
+        values.extend([
+            channel_config.get("search_tags", ""),
+            channel_config.get("legacy_search_tags", ""),
+        ])
+        if is_friday:
+            values.append(channel_config.get("friday_marker_tags", FRIDAY_SOURCE_CAPTION_TAGS))
     tags = []
     seen = set()
     for value in values:
@@ -500,9 +549,14 @@ def configured_search_tags(channel_config: dict, is_friday: bool) -> list:
     return tags
 
 
-def channel_post_is_eligible(caption: str, channel_config: dict, is_friday: bool) -> bool:
+def channel_post_is_eligible(
+    caption: str, channel_config: dict, is_friday: bool,
+    actual_username: str = None, known_usernames=None,
+) -> bool:
     text_value = (caption or "").casefold()
-    tags = configured_search_tags(channel_config, is_friday)
+    tags = configured_search_tags(
+        channel_config, is_friday, actual_username, known_usernames
+    )
     has_channel_tag = any(tag.casefold() in text_value for tag in tags)
     if is_friday:
         return has_channel_tag and any(tag in text_value for tag in JUMUAH_TAGS)
@@ -565,7 +619,7 @@ async def delete_previous_friday_target_posts(
     target_channel_id: int,
     current_friday,
     keep_message_ids=None,
-    friday_tag_config: str = FRIDAY_TARGET_CAPTION_TAGS,
+    friday_tag_config: str = FRIDAY_SOURCE_CAPTION_TAGS,
 ) -> int:
     """
     Target channel থেকে শুধু আজকের আগের দিনের Friday-tagged post মুছে।
@@ -701,7 +755,8 @@ async def run_refresh(target_index: int = 0):
     target_config = TARGET_CHANNELS[target_index]
     upstream_config = (
         {"name": "Source", "username": CHANNEL_USERNAME, "id": CHANNEL_ID,
-         "is_source": True, "caption_tags": SOURCE_CAPTION_TAGS,
+         "is_source": True, "auto_username_tags": True,
+         "caption_tags": SOURCE_CAPTION_TAGS,
          "friday_caption_tags": FRIDAY_SOURCE_CAPTION_TAGS}
         if target_index == 0 else TARGET_CHANNELS[target_index - 1]
     )
@@ -724,11 +779,29 @@ async def run_refresh(target_index: int = 0):
 
         if target_index == 0:
             upstream_id = await resolve_channel(client)
+            upstream_chat = await client.get_chat(upstream_id)
         else:
             upstream_chat = await resolve_configured_channel(client, upstream_config)
             upstream_id = upstream_chat.id
         target_chat = await resolve_configured_channel(client, target_config)
         target_id = target_chat.id
+        upstream_usernames = remember_channel_usernames(
+            upstream_chat,
+            CHANNEL_USERNAME if target_index == 0 else upstream_config.get("username"),
+        )
+        target_usernames = remember_channel_usernames(
+            target_chat, target_config.get("username")
+        )
+        if not getattr(upstream_chat, "username", None):
+            logger.warning(
+                f"⚠️ {upstream_config.get('name')} channel-এ public username নেই; "
+                "automatic #tag/@username তৈরি করা যাবে না"
+            )
+        if not getattr(target_chat, "username", None):
+            logger.warning(
+                f"⚠️ {target_name} channel-এ public username নেই; "
+                "automatic #tag/@username তৈরি করা যাবে না"
+            )
 
         oldest_candidate = None
         matched_kind = "configured chain tag"
@@ -736,7 +809,11 @@ async def run_refresh(target_index: int = 0):
             if msg.date is None or getattr(msg, "service", False) or getattr(msg, "empty", False):
                 continue
             caption = msg.caption or msg.text or ""
-            if channel_post_is_eligible(caption, upstream_config, is_friday):
+            if channel_post_is_eligible(
+                caption, upstream_config, is_friday,
+                getattr(upstream_chat, "username", None),
+                upstream_usernames,
+            ):
                 oldest_candidate = (msg, caption)
 
         if oldest_candidate is None:
@@ -747,17 +824,19 @@ async def run_refresh(target_index: int = 0):
             logger.info(f"🎯 {upstream_config.get('name')} থেকে oldest post id={old_id} নির্বাচিত")
             upstream_new = None
             try:
-                upstream_tags = channel_tag_config(upstream_config, is_friday)
-                upstream_caption = caption_with_tags(caption, upstream_tags)
-                upstream_entities = bold_tag_entities(caption, upstream_tags)
+                upstream_caption, upstream_entities = channel_caption_payload(
+                    caption, upstream_config, is_friday,
+                    getattr(upstream_chat, "username", None),
+                )
                 upstream_new = await copy_to_source_with_caption(
                     client, upstream_id, msg, upstream_caption,
                     caption_entities=upstream_entities,
                 )
                 logger.info(f"✅ {upstream_config.get('name')} refreshed copy → {upstream_new.id}")
-                target_tags = channel_tag_config(target_config, is_friday)
-                target_caption_text = caption_with_tags(caption, target_tags)
-                target_entities = bold_tag_entities(caption, target_tags)
+                target_caption_text, target_entities = channel_caption_payload(
+                    caption, target_config, is_friday,
+                    getattr(target_chat, "username", None),
+                )
                 target_new = await copy_to_target_with_caption(
                     client, target_id, upstream_id, msg, target_caption_text,
                     caption_entities=target_entities,
@@ -765,11 +844,15 @@ async def run_refresh(target_index: int = 0):
                 logger.info(f"✅ {target_name} copy → {target_new.id}")
 
                 if is_friday:
-                    friday_tags = target_config.get("friday_caption_tags", "")
+                    friday_tags = target_config.get(
+                        "friday_marker_tags", FRIDAY_SOURCE_CAPTION_TAGS
+                    )
                     deleted = await delete_previous_friday_target_posts(
                         client, target_id, now.date(),
                         keep_message_ids={target_new.id},
-                        friday_tag_config=friday_tags,
+                        friday_tag_config=target_config.get(
+                            "friday_marker_tags", FRIDAY_SOURCE_CAPTION_TAGS
+                        ),
                     )
                     logger.info(f"🕌 {target_name}: আগের Friday post delete {deleted}টি")
             except Exception as copy_err:
