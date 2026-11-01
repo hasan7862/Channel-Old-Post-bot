@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║           AUTO POST REFRESHER — USER SESSION MODE              ║
+║           AUTO POST REFRESHER — USER SESSION MODE (CHAIN CHANNELS)              ║
 ╚══════════════════════════════════════════════════════════════════╝
 
   ✅ নির্ধারিত সময়ে Account connect হয়, কাজ শেষে disconnect।
@@ -27,12 +27,37 @@ SESSION_STRING = "BQIIe4IACV5OFLbJbrFHblh0B_FxkoHnRqpRbA0DmRrA60bXiRSSfjDNdx_Ome
 CHANNEL_USERNAME = "ALQalam365"          # অথবা "" ফাঁকা রাখুন
 CHANNEL_ID       = -1003797236998       # Channel ID (backup হিসেবে)
 
-# 📢 দ্বিতীয় চ্যানেল — এখানে নতুন copy পোস্ট হবে
-# Target-এ শুক্রবারের নতুন post সফল হওয়ার পর আগের দিনের Jumuah-tagged post মুছবে;
-# target-এর অন্য message এবং আজকের শুক্রবারের post অক্ষত থাকবে।
-TARGET_CHANNEL_ID = -1003704917412
-# Username দিলে Telegram peer আগে থেকেই resolve করতে পারে; ID fallback হিসেবে থাকবে।
-TARGET_CHANNEL_USERNAME = "Islamic_Stor"
+# 📢 Chain channels — ক্রমানুসারে Source → Target 1 → Target 2 → Target 3
+# Target 1-এর schedule না দিলে পুরনো SCHEDULE_TIMES / FRIDAY_SCHEDULE_TIMES
+# ব্যবহার হবে। পরের target-গুলোর schedule আলাদা করে দিন।
+# প্রতিটি target আগের channel-এর tagged পুরনো post থেকে নেবে।
+# approval_enabled=True হলে ওই channel-এর pending join request approve হবে।
+TARGET_CHANNELS = [
+    {
+        "name": "Target 1",
+        "username": "Islamic_Stor",
+        "id": -1003704917412,
+        "caption_tags": "#IslamicStore",
+        "friday_caption_tags": "#Jumuah_Mubarak",
+        "schedule_times": None,          # None = SCHEDULE_TIMES ব্যবহার
+        "friday_schedule_times": None,  # None = FRIDAY_SCHEDULE_TIMES ব্যবহার
+        "approval_enabled": True,
+        "join_requests_per_run": 60,
+    },
+    # নতুন channel যোগ করতে নিচের block copy করে values দিন।
+    # Target 2-এর source হবে Target 1; Target 3-এর source হবে Target 2।
+    # {
+    #     "name": "Target 2",
+    #     "username": "YOUR_TARGET_2_USERNAME",
+    #     "id": -1001234567890,
+    #     "caption_tags": "#Target2Tag",
+    #     "friday_caption_tags": "#Jumuah_Mubarak",
+    #     "schedule_times": [("06:00", "PM")],
+    #     "friday_schedule_times": [("07:00", "PM")],
+    #     "approval_enabled": False,
+    #     "join_requests_per_run": 60,
+    # },
+]
 
 # 🏷️ Source এবং Target caption tags
 # একাধিক tag কমা দিয়ে লিখুন — যেমন:
@@ -46,7 +71,8 @@ FRIDAY_SOURCE_CAPTION_TAGS = "#Jumuah_Mubarak"
 TARGET_CAPTION_TAGS = "#IslamicStore"
 FRIDAY_TARGET_CAPTION_TAGS = "#Jumuah_Mubarak"
 
-# ০ দিলে pending join request approval বন্ধ থাকবে।
+# JOIN_REQUESTS_PER_RUN হলো channel-specific limit না দিলে ব্যবহৃত legacy default;
+# approval_enabled=True/False দিয়ে প্রতিটি target-এর approval চালু/বন্ধ করুন।
 JOIN_REQUESTS_PER_RUN = 60
 
 # ⏰ Auto Refresh সময়সূচি (বাংলাদেশ সময় — ১২ ঘণ্টা AM/PM)
@@ -55,6 +81,8 @@ JOIN_REQUESTS_PER_RUN = 60
 #
 #    উদাহরণ:
 #      ("6:00",  "AM")  →  ভোর ৬:০০
+#    এই root schedule Target 1-এর fallback; Target 2+ এর schedule
+#    TARGET_CHANNELS-এর প্রতিটি channel object-এ আলাদা করে দিন।
 #
 #    ✅ যত খুশি লাইন যোগ করুন — কোনো সীমা নেই
 # ---------------------------------------------------------------
@@ -100,7 +128,7 @@ import os
 import re
 import pytz
 from datetime import datetime
-from threading import Thread
+from threading import Thread, Lock
 
 # Python 3.12+ fix: event loop must exist before Pyrogram loads
 try:
@@ -110,7 +138,8 @@ except RuntimeError:
 
 import time
 from flask import Flask
-from pyrogram import Client
+from pyrogram import Client, enums
+from pyrogram.types import MessageEntity
 from pyrogram.errors import FloodWait, MessageDeleteForbidden, MessageIdInvalid
 
 logging.basicConfig(
@@ -183,19 +212,25 @@ def parse_tags(tag_text: str) -> list:
 
 
 def caption_without_tags(caption: str) -> str:
-    """Caption-এর পুরনো hashtag সরিয়ে মূল লেখা রাখে।"""
-    base = re.sub(r"(?<!\w)#[^\s#]+", "", caption or "")
+    """Caption-এর পুরনো hashtag এবং paired @mention সরিয়ে মূল লেখা রাখে।"""
+    # আগে তৈরি করা "#Tag , @Tag" জোড়া একসাথে সরাই, unrelated @mention নয়।
+    base = re.sub(
+        r"(?<!\w)#[^\s#]+\s*,\s*@[A-Za-z0-9_]+", "", caption or ""
+    )
+    base = re.sub(r"(?<!\w)#[^\s#]+", "", base)
     base = re.sub(r"[ \t]+\n", "\n", base)
     return re.sub(r"\n{3,}", "\n\n", base).strip()
 
 
 def caption_with_tags(caption: str, tag_config: str) -> str:
-    """মূল caption-এর শেষে configured tags একই লাইনে যোগ করে।"""
+    """Caption-এর শেষে প্রতিটি tag-কে #Tag , @Tag pair হিসেবে যোগ করে।"""
     base = caption_without_tags(caption)
-    tags_line = " ".join(parse_tags(tag_config))
-    if base and tags_line:
-        return f"{base}\n\n{tags_line}"
-    return base or tags_line
+    paired_tags = " ".join(
+        f"{tag} , @{tag[1:]}" for tag in parse_tags(tag_config)
+    )
+    if base and paired_tags:
+        return f"{base}\n\n{paired_tags}"
+    return base or paired_tags
 
 
 def is_jumuah(caption: str) -> bool:
@@ -243,6 +278,7 @@ _SLOTS_FILE = "fired_slots.txt"
 # A short grace window prevents a scheduled run being lost when the
 # scheduler wakes a few seconds late after a restart/deploy.
 SLOT_GRACE_SECONDS = 90
+_REFRESH_LOCK = Lock()
 
 def _load_slots() -> set:
     try:
@@ -270,36 +306,37 @@ def _prune_slots(slots: set) -> set:
         pass
     return kept
 
+def _edge_schedule(target_index: int, now=None):
+    """Target schedule None হলে legacy root schedule/fallback বজায় রাখে."""
+    current = now or datetime.now(DHAKA_TZ)
+    config = TARGET_CHANNELS[target_index]
+    if current.weekday() == 4:
+        friday = config.get("friday_schedule_times")
+        if friday is None:
+            friday = FRIDAY_SCHEDULE_TIMES
+        if friday:
+            return friday
+    regular = config.get("schedule_times")
+    return SCHEDULE_TIMES if regular is None else regular
+
+
+def _edge_slot_key(target_index: int, slot_time: str) -> str:
+    return f"{target_index}|{slot_time}"
+
+
 def _prefill_past_slots(fired: set) -> set:
-    """
-    Startup-এ আজকের যেসব scheduled time grace window-এর বেশি আগে পেরিয়ে গেছে,
-    সেগুলো fired সেটে ভরে দেয়।
-
-    কেন দরকার:
-      Render-এ প্রতি deploy-এ fresh container আসে → fired_slots.txt থাকে না।
-      তাই ৮টায় deploy হলে ৫টার slot আবার fire করত।
-      এই ফাংশন সেটা ঠেকায়।
-    """
-    now   = datetime.now(DHAKA_TZ)
+    """প্রতিটি chain edge-এর আজকের grace window পেরোনো slot skip করে।"""
+    now = datetime.now(DHAKA_TZ)
     today = now.strftime("%Y-%m-%d")
-    today_schedule = schedule_for(now)
-
-    for ts, period in today_schedule:
-        h, m = parse_ampm(ts, period)
-        scheduled_at = now.replace(
-            hour=h, minute=m, second=0, microsecond=0
-        )
-        # Grace window পেরিয়ে গেলে পুরনো slot — skip করো।
-        if (now - scheduled_at).total_seconds() > SLOT_GRACE_SECONDS:
-            slot_key = f"{today} {h:02d}:{m:02d}"
-            if slot_key not in fired:
-                fired.add(slot_key)
-                _persist_slot(slot_key)
-                h12 = h % 12 or 12
-                ap  = "AM" if h < 12 else "PM"
-                logger.info(
-                    f"⏭️  Startup guard: আজকের {h12}:{m:02d} {ap} slot পেরিয়ে গেছে → skip হবে"
-                )
+    for index in range(len(TARGET_CHANNELS)):
+        for ts, period in _edge_schedule(index, now):
+            h, m = parse_ampm(ts, period)
+            scheduled_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if (now - scheduled_at).total_seconds() > SLOT_GRACE_SECONDS:
+                key = _edge_slot_key(index, f"{today} {h:02d}:{m:02d}")
+                if key not in fired:
+                    fired.add(key)
+                    _persist_slot(key)
     return fired
 
 
@@ -336,37 +373,34 @@ async def resolve_channel(client: Client) -> int:
     raise RuntimeError(f"Channel পাওয়া যায়নি (ID={CHANNEL_ID}, Username={CHANNEL_USERNAME})")
 
 
-async def resolve_target_channel(client: Client):
-    """Target channel-এর chat object ফেরত দেয় (username → dialogs fallback)।"""
-    if TARGET_CHANNEL_USERNAME:
+async def resolve_configured_channel(client: Client, channel_config: dict):
+    """Username আগে, পরে ID দিয়ে যেকোনো chain channel resolve করে।"""
+    username = (channel_config.get("username") or "").strip().lstrip("@")
+    channel_id = channel_config.get("id")
+    if username:
         try:
-            chat = await client.get_chat(TARGET_CHANNEL_USERNAME)
-            logger.info(f"📢 Target channel: {chat.title} (id={chat.id})")
+            chat = await client.get_chat(username)
+            logger.info(f"📢 {channel_config.get('name', 'Channel')}: {chat.title} (id={chat.id})")
             return chat
         except Exception as e:
-            logger.warning(
-                f"⚠️ Target username দিয়ে resolve হয়নি: {e} — dialog search চেষ্টা করছি..."
-            )
-
+            logger.warning(f"⚠️ {channel_config.get('name', 'Channel')} username resolve হয়নি: {e}")
     async for dialog in client.get_dialogs():
-        if dialog.chat.id == TARGET_CHANNEL_ID:
-            logger.info(
-                f"📢 Target channel dialog থেকে পাওয়া: {dialog.chat.title}"
-            )
+        if channel_id is not None and dialog.chat.id == int(channel_id):
+            logger.info(f"📢 {channel_config.get('name', 'Channel')} dialog থেকে পাওয়া: {dialog.chat.title}")
             return dialog.chat
     raise RuntimeError(
-        f"Target channel পাওয়া যায়নি "
-        f"(ID={TARGET_CHANNEL_ID}, Username={TARGET_CHANNEL_USERNAME})"
+        f"Channel পাওয়া যায়নি ({channel_config.get('name')}, "
+        f"ID={channel_id}, Username={username})"
     )
 
 
-async def approve_target_join_requests(client: Client, target_channel_id: int) -> int:
-    """Pending join request থেকে সর্বোচ্চ ৪০টি request approve করে।"""
+async def approve_target_join_requests(client: Client, target_channel_id: int, limit: int) -> int:
+    """Pending join request থেকে configured limit পর্যন্ত approve করে।"""
     approved = 0
     try:
         async for request in client.get_chat_join_requests(
             target_channel_id,
-            limit=JOIN_REQUESTS_PER_RUN,
+            limit=limit,
         ):
             user = getattr(request, "from_user", None) or getattr(request, "user", None)
             user_id = getattr(user, "id", None)
@@ -398,29 +432,81 @@ async def approve_target_join_requests(client: Client, target_channel_id: int) -
         logger.warning(f"⚠️ Target join request পড়া যায়নি: {e}")
 
     logger.info(
-        f"👥 Target channel join approval: {approved}/{JOIN_REQUESTS_PER_RUN}"
+        f"👥 Target channel join approval: {approved}/{limit}"
     )
     return approved
 
 
-def target_caption(caption: str, is_friday: bool) -> str:
-    """Target caption-এ শুক্রবার/সাধারণ দিনের configured tags রাখে।"""
+def channel_caption(caption: str, channel_config: dict, is_friday: bool) -> str:
     tag_config = (
-        FRIDAY_TARGET_CAPTION_TAGS
-        if is_friday
-        else TARGET_CAPTION_TAGS
+        channel_config.get("friday_caption_tags", "")
+        if is_friday else channel_config.get("caption_tags", "")
     )
     return caption_with_tags(caption, tag_config)
 
+
+
+def channel_tag_config(channel_config: dict, is_friday: bool) -> str:
+    if channel_config.get("is_source"):
+        return FRIDAY_SOURCE_CAPTION_TAGS if is_friday else SOURCE_CAPTION_TAGS
+    return (
+        channel_config.get("friday_caption_tags", "")
+        if is_friday else channel_config.get("caption_tags", "")
+    )
+
+
+def bold_tag_entities(caption: str, tag_config: str) -> list:
+    """শুধু appended #Tag , @Tag অংশটিকে Telegram bold entity করে।"""
+    base = caption_without_tags(caption)
+    paired_tags = " ".join(
+        f"{tag} , @{tag[1:]}" for tag in parse_tags(tag_config)
+    )
+    if not paired_tags:
+        return []
+
+    def utf16_length(value: str) -> int:
+        return len(value.encode("utf-16-le")) // 2
+
+    return [MessageEntity(
+        type=enums.MessageEntityType.BOLD,
+        offset=utf16_length(base + "\n\n"),
+        length=utf16_length(paired_tags),
+    )]
 
 def source_caption(caption: str, is_friday: bool) -> str:
-    """Source refreshed copy-তে configured tags রাখে।"""
-    tag_config = (
-        FRIDAY_SOURCE_CAPTION_TAGS
-        if is_friday
-        else SOURCE_CAPTION_TAGS
-    )
+    tag_config = FRIDAY_SOURCE_CAPTION_TAGS if is_friday else SOURCE_CAPTION_TAGS
     return caption_with_tags(caption, tag_config)
+
+
+def configured_search_tags(channel_config: dict, is_friday: bool) -> list:
+    """এই channel-এর post পরের chain ধাপে খুঁজতে যেসব tag ব্যবহার হবে।"""
+    if channel_config.get("is_source"):
+        values = [SOURCE_SEARCH_TAGS, SOURCE_CAPTION_TAGS, FRIDAY_SOURCE_CAPTION_TAGS]
+        if is_friday:
+            values.append(FRIDAY_SOURCE_CAPTION_TAGS)
+    else:
+        field = "friday_search_tags" if is_friday else "search_tags"
+        values = [channel_config.get(field, "")]
+        caption_field = "friday_caption_tags" if is_friday else "caption_tags"
+        values.append(channel_config.get(caption_field, ""))
+    tags = []
+    seen = set()
+    for value in values:
+        for tag in parse_tags(value):
+            key = tag.casefold()
+            if key not in seen:
+                tags.append(tag)
+                seen.add(key)
+    return tags
+
+
+def channel_post_is_eligible(caption: str, channel_config: dict, is_friday: bool) -> bool:
+    text_value = (caption or "").casefold()
+    tags = configured_search_tags(channel_config, is_friday)
+    has_channel_tag = any(tag.casefold() in text_value for tag in tags)
+    if is_friday:
+        return has_channel_tag and any(tag in text_value for tag in JUMUAH_TAGS)
+    return has_channel_tag and not any(tag in text_value for tag in JUMUAH_TAGS)
 
 
 async def copy_to_target_with_caption(
@@ -429,21 +515,23 @@ async def copy_to_target_with_caption(
     source_channel_id: int,
     message,
     caption: str,
+    caption_entities=None,
 ):
-    """
-    Target channel-এ নতুন post তৈরি করে এবং target-specific caption রাখে।
-    Media হলে copy_message, text হলে send_message ব্যবহার করা হয়।
-    """
+    """Target-এ caption এবং নির্বাচিত Telegram formatting entity সহ copy করে।"""
     if getattr(message, "media", None):
         return await client.copy_message(
             chat_id=target_channel_id,
             from_chat_id=source_channel_id,
             message_id=message.id,
             caption=caption,
+            caption_entities=caption_entities,
+            parse_mode=None,
         )
     return await client.send_message(
         chat_id=target_channel_id,
         text=caption,
+        entities=caption_entities,
+        parse_mode=None,
     )
 
 
@@ -452,18 +540,23 @@ async def copy_to_source_with_caption(
     source_channel_id: int,
     message,
     caption: str,
+    caption_entities=None,
 ):
-    """Source channel-এ configured caption সহ নতুন refreshed copy রাখে।"""
+    """Upstream-এ caption এবং নির্বাচিত Telegram formatting entity সহ copy করে।"""
     if getattr(message, "media", None):
         return await client.copy_message(
             chat_id=source_channel_id,
             from_chat_id=source_channel_id,
             message_id=message.id,
             caption=caption,
+            caption_entities=caption_entities,
+            parse_mode=None,
         )
     return await client.send_message(
         chat_id=source_channel_id,
         text=caption,
+        entities=caption_entities,
+        parse_mode=None,
     )
 
 
@@ -472,13 +565,14 @@ async def delete_previous_friday_target_posts(
     target_channel_id: int,
     current_friday,
     keep_message_ids=None,
+    friday_tag_config: str = FRIDAY_TARGET_CAPTION_TAGS,
 ) -> int:
     """
     Target channel থেকে শুধু আজকের আগের দিনের Friday-tagged post মুছে।
     Friday tags exact hashtag হিসেবে মিলবে; আজকের post ও অন্য tag-এর post থাকবে।
     """
     friday_tags = {
-        tag.casefold() for tag in parse_tags(FRIDAY_TARGET_CAPTION_TAGS)
+        tag.casefold() for tag in parse_tags(friday_tag_config)
     }
     if not friday_tags:
         logger.warning(
@@ -593,189 +687,131 @@ async def delete_previous_friday_target_posts(
 
 
 # ── একটি Refresh চক্র: connect → কাজ → disconnect ─────────────────
-async def run_refresh():
-    now       = datetime.now(DHAKA_TZ)
-    is_friday = now.weekday() == 4   # 0=Mon, 4=Fri
-    friday_custom_schedule = is_friday and bool(FRIDAY_SCHEDULE_TIMES)
+async def run_refresh(target_index: int = 0):
+    """একটি chain edge চালায়: upstream → target; পুরনো order বজায় থাকে।"""
+    if not TARGET_CHANNELS:
+        logger.error("❌ TARGET_CHANNELS খালি — কোনো destination configured নেই")
+        return
+    if target_index < 0 or target_index >= len(TARGET_CHANNELS):
+        logger.error(f"❌ ভুল target index: {target_index}")
+        return
 
+    now = datetime.now(DHAKA_TZ)
+    is_friday = now.weekday() == 4
+    target_config = TARGET_CHANNELS[target_index]
+    upstream_config = (
+        {"name": "Source", "username": CHANNEL_USERNAME, "id": CHANNEL_ID,
+         "is_source": True, "caption_tags": SOURCE_CAPTION_TAGS,
+         "friday_caption_tags": FRIDAY_SOURCE_CAPTION_TAGS}
+        if target_index == 0 else TARGET_CHANNELS[target_index - 1]
+    )
+    target_name = target_config.get("name", f"Target {target_index + 1}")
     logger.info(
-        f"\n{'='*56}\n"
-        f"  🔄 Auto Refresh শুরু\n"
-        f"  ⏰ সময় : {now.strftime('%I:%M %p')} (BD)\n"
-        f"  📅 দিন  : {'শুক্রবার ✅' if is_friday else now.strftime('%A')}\n"
-        f"  🗓️ সময়সূচি : "
-        f"{'শুক্রবারের আলাদা সময়' if friday_custom_schedule else 'সাধারণ সময়সূচি'}\n"
+        f"\n{'='*56}\n  🔄 Chain refresh: {upstream_config.get('name')} → {target_name}\n"
+        f"  ⏰ {now.strftime('%I:%M %p')} (BD) | {'শুক্রবার' if is_friday else now.strftime('%A')}\n"
         f"{'='*56}"
     )
 
-    client    = Client(
-        name           = "refresher",
-        api_id         = API_ID,
-        api_hash       = API_HASH,
-        session_string = SESSION_STRING,
+    client = Client(
+        name="refresher", api_id=API_ID, api_hash=API_HASH,
+        session_string=SESSION_STRING,
     )
     refreshed = 0
-
     try:
         await client.start()
         me = await client.get_me()
         logger.info(f"🔗 Account: {me.first_name} (@{me.username})")
 
-        channel_id = await resolve_channel(client)
-        target_chat = await resolve_target_channel(client)
-        target_channel_id = target_chat.id
+        if target_index == 0:
+            upstream_id = await resolve_channel(client)
+        else:
+            upstream_chat = await resolve_configured_channel(client, upstream_config)
+            upstream_id = upstream_chat.id
+        target_chat = await resolve_configured_channel(client, target_config)
+        target_id = target_chat.id
 
-        # Pyrogram history newest → oldest আসে।
-        # তাই প্রতিটি matching post-এ candidate replace করতে থাকলে
-        # scan শেষে সবচেয়ে পুরনো matching post-টাই থাকবে।
-        # এইভাবেই A → B → C serial refresh চলবে।
         oldest_candidate = None
-        matched_kind = None
-        async for msg in client.get_chat_history(channel_id):
-            if msg.date is None or msg.service or msg.empty:
+        matched_kind = "configured chain tag"
+        async for msg in client.get_chat_history(upstream_id):
+            if msg.date is None or getattr(msg, "service", False) or getattr(msg, "empty", False):
                 continue
-
             caption = msg.caption or msg.text or ""
+            if channel_post_is_eligible(caption, upstream_config, is_friday):
+                oldest_candidate = (msg, caption)
 
-            # শুক্রবার: source tag-সহ শুধু Jumuah পোস্ট
-            if is_friday:
-                eligible = is_jumuah(caption)
-                if eligible:
-                    oldest_candidate = (msg, caption)
-                    matched_kind = "Friday/Jumuah"
-            else:
-                # অন্য দিন: সব matching source-tagged post-এর মধ্যে
-                # সবচেয়ে পুরনোটি রাখো।
-                eligible = is_regular(caption)
-                if eligible:
-                    oldest_candidate = (msg, caption)
-                    if has_source_search_tag(caption):
-                        matched_kind = "legacy source tag"
-                    elif has_current_source_tag(caption):
-                        matched_kind = "current source tag"
-                    else:
-                        matched_kind = "source tag"
-
-        logger.info(
-            f"📋 {'সবচেয়ে পুরনো matching post নির্বাচিত হয়েছে' if oldest_candidate else 'কোনো matching post পাওয়া যায়নি'}"
-        )
-
-        # প্রতি scheduled run-এ সবচেয়ে পুরনো eligible post refresh হবে।
-        # Copy দুটো সফল হলে শুধু তার পুরনো source post delete হবে।
-        if oldest_candidate is not None:
+        if oldest_candidate is None:
+            logger.info(f"ℹ️ {upstream_config.get('name')} channel-এ উপযুক্ত tagged post নেই")
+        else:
             msg, caption = oldest_candidate
-            old_id  = msg.id
-            preview = caption[:70].replace("\n", " ") if caption else "[media]"
-            logger.info(
-                f"\n  🎯 সবচেয়ে পুরনো tagged post Refresh: "
-                f"id={old_id} | tag={matched_kind} | {preview}"
-            )
-
-            source_new = None
-            copy_stage = "source"
+            old_id = msg.id
+            logger.info(f"🎯 {upstream_config.get('name')} থেকে oldest post id={old_id} নির্বাচিত")
+            upstream_new = None
             try:
-                # আগে source copy সফল করি, তারপর target-এ আলাদা caption সহ
-                # নতুন post করি। এতে source protected হলে target-এ orphan post
-                # তৈরি হবে না।
-                source_new = await copy_to_source_with_caption(
-                    client=client,
-                    source_channel_id=channel_id,
-                    message=msg,
-                    caption=source_caption(caption, is_friday),
+                upstream_tags = channel_tag_config(upstream_config, is_friday)
+                upstream_caption = caption_with_tags(caption, upstream_tags)
+                upstream_entities = bold_tag_entities(caption, upstream_tags)
+                upstream_new = await copy_to_source_with_caption(
+                    client, upstream_id, msg, upstream_caption,
+                    caption_entities=upstream_entities,
                 )
-                logger.info(
-                    f"  ✅ Source channel-এ refreshed copy → new_id={source_new.id}"
-                )
-
-                # শুক্রবারে শুধু #Jumah, অন্য দিনে শুধু #Islam যোগ হবে।
-                copy_stage = "target"
+                logger.info(f"✅ {upstream_config.get('name')} refreshed copy → {upstream_new.id}")
+                target_tags = channel_tag_config(target_config, is_friday)
+                target_caption_text = caption_with_tags(caption, target_tags)
+                target_entities = bold_tag_entities(caption, target_tags)
                 target_new = await copy_to_target_with_caption(
-                    client=client,
-                    target_channel_id=target_channel_id,
-                    source_channel_id=channel_id,
-                    message=msg,
-                    caption=target_caption(caption, is_friday),
+                    client, target_id, upstream_id, msg, target_caption_text,
+                    caption_entities=target_entities,
                 )
-                logger.info(
-                    f"  ✅ Target channel-এ নতুন পোস্ট → new_id={target_new.id}"
-                )
+                logger.info(f"✅ {target_name} copy → {target_new.id}")
 
-                # Friday target copy সফল হওয়ার পরেই আগের সপ্তাহ(গুলো)র
-                # Jumuah-tagged target post মুছি; send ব্যর্থ হলে পুরনো post থাকবে।
                 if is_friday:
-                    deleted_friday_posts = await delete_previous_friday_target_posts(
-                        client=client,
-                        target_channel_id=target_channel_id,
-                        current_friday=now.astimezone(DHAKA_TZ).date(),
+                    friday_tags = target_config.get("friday_caption_tags", "")
+                    deleted = await delete_previous_friday_target_posts(
+                        client, target_id, now.date(),
                         keep_message_ids={target_new.id},
+                        friday_tag_config=friday_tags,
                     )
-                    logger.info(
-                        f"  🕌 Target-এর পুরনো Friday post মুছেছে: "
-                        f"{deleted_friday_posts}টি"
-                    )
-
+                    logger.info(f"🕌 {target_name}: আগের Friday post delete {deleted}টি")
             except Exception as copy_err:
                 logger.error(
-                    f"  ❌ {copy_stage} copy ব্যর্থ: "
-                    f"{type(copy_err).__name__}: {copy_err!r} — "
-                    "source old post delete হবে না"
+                    f"❌ {target_name} chain copy ব্যর্থ: {type(copy_err).__name__}: {copy_err!r}; "
+                    "upstream পুরনো post delete হবে না"
                 )
-                # Target copy ব্যর্থ হলে শুধু এই run-এর নতুন source copy rollback।
-                if source_new is not None:
+                if upstream_new is not None:
                     try:
-                        await client.delete_messages(channel_id, source_new.id)
-                        logger.info(
-                            f"  ↩️ অসম্পূর্ণ source copy rollback → new_id={source_new.id}"
-                        )
+                        await client.delete_messages(upstream_id, upstream_new.id)
+                        logger.info(f"↩️ অসম্পূর্ণ upstream copy rollback → {upstream_new.id}")
                     except Exception as rollback_err:
-                        logger.error(
-                            f"  ❌ source rollback ব্যর্থ: {rollback_err}"
-                        )
+                        logger.error(f"❌ upstream rollback ব্যর্থ: {rollback_err}")
             else:
                 await asyncio.sleep(1.5)
-
-                # copy দুটো সফল হলেই পুরনো post delete
                 try:
-                    await client.delete_messages(channel_id, old_id)
-                    logger.info(f"  🗑️  পুরনো পোস্ট ডিলেট → old_id={old_id}\n")
+                    await client.delete_messages(upstream_id, old_id)
+                    logger.info(f"🗑️ {upstream_config.get('name')} পুরনো post delete → {old_id}")
                 except FloodWait as e:
-                    logger.warning(f"  ⏳ FloodWait {e.value}s...")
                     await asyncio.sleep(e.value + 1)
-                    await client.delete_messages(channel_id, old_id)
+                    await client.delete_messages(upstream_id, old_id)
                 except Exception as del_err:
-                    logger.error(f"  ❌ delete ব্যর্থ: {del_err}")
-
+                    logger.error(f"❌ upstream পুরনো post delete ব্যর্থ: {del_err}")
                 refreshed += 1
 
-        # Scheduled run-এর সঙ্গে target channel-এর pending request approve হবে।
-        # Post refresh সফল/ব্যর্থ—দুই অবস্থাতেই approval আলাদাভাবে চলবে।
-        # তাই approval log দেখা মানেই post copy সফল হয়েছে—এমন নয়।
-        # ০ দিলে approval বন্ধ থাকবে। Friday-tagged পুরনো target post cleanup
-        # শুধু উপরের Friday target-copy সফল হওয়ার পর চলে।
-        if JOIN_REQUESTS_PER_RUN > 0:
-            await approve_target_join_requests(client, target_channel_id)
+        approval_enabled = bool(target_config.get("approval_enabled", False))
+        approval_limit = int(target_config.get("join_requests_per_run", JOIN_REQUESTS_PER_RUN))
+        if approval_enabled and approval_limit > 0:
+            await approve_target_join_requests(client, target_id, approval_limit)
         else:
-            logger.info("👥 Target channel join approval বন্ধ (JOIN_REQUESTS_PER_RUN=0)")
-
-        if refreshed == 0:
-            if is_friday:
-                logger.info("  ℹ️  শুক্রবার: #ALQalamBD + #Jumuah পোস্ট পাওয়া যায়নি")
-            else:
-                logger.info(
-                    "  ℹ️  Refresh-যোগ্য পোস্ট পাওয়া যায়নি বা copy ব্যর্থ হয়েছে"
-                )
-
+            logger.info(f"👥 {target_name} join-request approval বন্ধ")
     except FloodWait as e:
-        logger.warning(f"⏳ FloodWait {e.value}s — পরবর্তী সময়ে চেষ্টা হবে")
+        logger.warning(f"⏳ FloodWait {e.value}s — পরবর্তী scheduled run-এ চেষ্টা হবে")
         await asyncio.sleep(e.value)
     except Exception as e:
-        logger.error(f"❌ Refresh ব্যর্থ: {e}")
+        logger.error(f"❌ Chain refresh ব্যর্থ ({target_name}): {type(e).__name__}: {e}")
     finally:
         try:
             await client.stop()
         except Exception:
             pass
-        logger.info(f"🔌 Account disconnect | ✅ {refreshed}টি পোস্ট Refresh হয়েছে\n")
+        logger.info(f"🔌 Account disconnect | {target_name}: {refreshed}টি post chain হয়েছে")
 
 
 # ── Flask keep-alive (Render free tier) ────────────────────────────
@@ -784,29 +820,20 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     now = datetime.now(DHAKA_TZ).strftime("%Y-%m-%d %I:%M %p")
-    regular_sl = format_schedule(SCHEDULE_TIMES)
-    friday_sl = format_schedule(FRIDAY_SCHEDULE_TIMES)
-    friday_text = (
-        ", ".join(friday_sl) + " (শুধু Jumuah)"
-        if friday_sl
-        else "সাধারণ সময়সূচি অনুসরণ করবে"
-    )
+    chain_rows = [f"<li>Source → {TARGET_CHANNELS[0].get('name', 'Target 1')}</li>"] if TARGET_CHANNELS else []
+    for i in range(1, len(TARGET_CHANNELS)):
+        chain_rows.append(f"<li>{TARGET_CHANNELS[i-1].get('name', f'Target {i}')} → {TARGET_CHANNELS[i].get('name', f'Target {i+1}')}</li>")
     return (
         "<h2>✅ Auto Post Refresher চলছে</h2>"
         f"<p>বাংলাদেশ সময়: <b>{now}</b></p>"
-        "<p>💡 Account শুধু Refresh-এর সময় connect হয়</p>"
-        f"<p>Channel: <b>@{CHANNEL_USERNAME or CHANNEL_ID}</b></p>"
-        f"<p>সাধারণ Schedule ({len(regular_sl)}টি):<br>"
-        + "<br>".join(f"&nbsp;&nbsp;• {s} (BD)" for s in regular_sl)
-        + f"</p><p>শুক্রবারের Jumuah Schedule:<br>"
-        + f"&nbsp;&nbsp;• {friday_text}"
-        + f"</p><p>Source tags: <b>{' '.join(parse_tags(SOURCE_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
-        + f"<br>শুক্রবার Source tags: <b>{' '.join(parse_tags(FRIDAY_SOURCE_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
-        + f"<br>Target tags: <b>{' '.join(parse_tags(TARGET_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
-        + f"<br>শুক্রবার Target tags: <b>{' '.join(parse_tags(FRIDAY_TARGET_CAPTION_TAGS)) or '(কোনো tag নেই)'}</b>"
-        + "</p><p>শুক্রবার নতুন target post সফল হলে, আজকের আগের তারিখের Friday-tagged target post-গুলো মুছবে; আজকের post ও অন্য post থাকবে।</p>"
-        + "<p>প্রতিবার: সব পোস্টের মধ্যে সবচেয়ে পুরনো matching/tagged পোস্টটি ১টি Refresh হবে</p>"
+        "<p>Chain: Source → Target 1 → Target 2 → …</p>"
+        f"<ol>{''.join(chain_rows)}</ol>"
+        f"<p>Root schedule: {', '.join(format_schedule(SCHEDULE_TIMES)) or '(নেই)'}</p>"
+        f"<p>Friday root schedule: {', '.join(format_schedule(FRIDAY_SCHEDULE_TIMES)) or 'সাধারণ schedule fallback'}</p>"
+        "<p>প্রতিটি caption tag pair আকারে যাবে: #Tag , @Tag</p>"
+        "<p>Target-এর schedule None হলে প্রথম Target-এর জন্য root schedule ব্যবহৃত হবে।</p>"
     )
+
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -817,81 +844,52 @@ def run_flask():
 
 
 # ── Sync wrapper — clock thread থেকে async চালায় ──────────────────
-def _run_refresh_sync():
-    """Clock scheduler-এর daemon thread হিসেবে চলে — fresh event loop তৈরি করে।"""
-    logger.info("⏰ Scheduled time match → Refresh শুরু হচ্ছে...")
+def _run_refresh_sync(target_index: int):
+    """একটি chain edge serialized async job হিসেবে চালায়।"""
+    logger.info(f"⏰ Chain edge {target_index + 1} scheduled → Refresh শুরু")
     try:
-        asyncio.run(run_refresh())
+        with _REFRESH_LOCK:
+            asyncio.run(run_refresh(target_index))
     except Exception as e:
         logger.error(f"❌ _run_refresh_sync error: {e}")
 
 
-# ── Clock-based scheduler loop ──────────────────────────────────────
 def _clock_scheduler():
-    """
-    প্রতি ৫ সেকেন্ডে BD ঘড়ি চেক করে।
-    scheduled time থেকে SLOT_GRACE_SECONDS-এর মধ্যে — এবং সেই slot
-    আগে না চললে — refresh job চালায়।
-
-    Restart-proof: চলে-যাওয়া slot _SLOTS_FILE-এ persist থাকে।
-    Render ৫০০ বার restart দিলেও সঠিক মিনিট ছাড়া চলবে না।
-    """
-    # startup: আজকের পুরনো slot লোড করো, তারপর grace window পেরিয়ে যাওয়া
-    # slots মার্ক করো
+    """প্রতি ৫ সেকেন্ডে প্রতিটি target-এর নিজস্ব schedule পরীক্ষা করে।"""
     fired = _prune_slots(_load_slots())
     fired = _prefill_past_slots(fired)
-
     now = datetime.now(DHAKA_TZ)
-    regular_labels = format_schedule(SCHEDULE_TIMES)
-    friday_labels = format_schedule(FRIDAY_SCHEDULE_TIMES)
-    friday_schedule_label = (
-        ", ".join(friday_labels)
-        if friday_labels
-        else "সাধারণ সময়সূচির fallback"
-    )
     logger.info(
-        f"\n{'='*60}\n"
-        f"  🤖 Auto Post Refresher সক্রিয়!\n"
-        f"  📅 বাংলাদেশ সময়  : {now.strftime('%Y-%m-%d %I:%M %p')}\n"
-        f"  📢 Source Channel : @{CHANNEL_USERNAME or CHANNEL_ID}\n"
-        f"  📢 Target Channel : {TARGET_CHANNEL_ID}\n"
-        f"  ⏰ সাধারণ Schedule : {', '.join(regular_labels) or '(কোনো সময় সেট নেই)'}\n"
-        f"  🕌 Friday Schedule : {friday_schedule_label}\n"
-        f"  📦 প্রতি slot      : oldest matching/tagged post ১টি Refresh + "
-        f"{JOIN_REQUESTS_PER_RUN}টি পর্যন্ত join approval\n"
-        f"  💡 Account শুধু Refresh-এর সময় active হয়\n"
-        f"  🔁 চেক           : প্রতি ৫ সেকেন্ডে BD সময় দেখা হয় "
-        f"(grace {SLOT_GRACE_SECONDS}s)\n"
+        f"\n{'='*60}\n  🤖 Auto Post Refresher সক্রিয়\n"
+        f"  📅 বাংলাদেশ সময়: {now.strftime('%Y-%m-%d %I:%M %p')}\n"
+        f"  🔗 Chain edges: {len(TARGET_CHANNELS)}\n"
+        f"  🔁 প্রতি ৫ সেকেন্ডে schedule check (grace {SLOT_GRACE_SECONDS}s)\n"
         f"{'='*60}"
     )
-
     while True:
         try:
-            now      = datetime.now(DHAKA_TZ)
-            today    = now.strftime("%Y-%m-%d")
-            today_schedule = schedule_for(now)
-
-            # নতুন দিন শুরু হলে in-memory set রিফ্রেশ করো
-            # (ফাইলে ইতিমধ্যে আগের দিনের slot নেই — _prune_slots মুছে দিয়েছে)
-            if not any(s.startswith(today) for s in fired) and fired:
+            now = datetime.now(DHAKA_TZ)
+            today = now.strftime("%Y-%m-%d")
+            if not any(s.split("|", 1)[-1].startswith(today) for s in fired) and fired:
                 fired = _prune_slots(fired)
-
-            # Exact minute-এর বদলে grace window-এ চেক করি, যাতে ৩০–৬০
-            # সেকেন্ড দেরিতে scheduler জাগলেও post মিস না হয়।
-            slot_key = _scheduled_slot_for(now, today_schedule)
-            if slot_key and slot_key not in fired:
-                # ── সাথে সাথে slot mark করো → rapid restart-এও দ্বিতীয়বার চলবে না
+            for index in range(len(TARGET_CHANNELS)):
+                slot_time = _scheduled_slot_for(now, _edge_schedule(index, now))
+                if not slot_time:
+                    continue
+                slot_key = _edge_slot_key(index, slot_time)
+                # পুরনো version-এ Target 1 slot edge prefix ছাড়া সেভ হতো;
+                # deploy/restart-এর একই minute-এ সেটিকেও fired হিসেবে মানি।
+                if slot_key in fired or (index == 0 and slot_time in fired):
+                    continue
                 fired.add(slot_key)
                 _persist_slot(slot_key)
                 logger.info(
-                    f"⏰ {now.strftime('%I:%M:%S %p')} BD — scheduled! "
-                    "→ job চালু হচ্ছে"
+                    f"⏰ {now.strftime('%I:%M:%S %p')} BD — "
+                    f"{TARGET_CHANNELS[index].get('name', f'Target {index+1}')} schedule fired"
                 )
-                Thread(target=_run_refresh_sync, daemon=True).start()
-
+                Thread(target=_run_refresh_sync, args=(index,), daemon=True).start()
         except Exception as e:
             logger.error(f"❌ clock scheduler error: {e}")
-
         time.sleep(5)
 
 
