@@ -46,16 +46,16 @@ TARGET_CHANNELS = [
     },
     # নতুন channel যোগ করতে নিচের block copy করে values দিন।
     # Target 2-এর source হবে Target 1; Target 3-এর source হবে Target 2।
-    # {
-    #     "name": "Target 2",
-    #     "username": "YOUR_TARGET_2_USERNAME",
-    #     "id": -1001234567890,
-    #     "auto_username_tags": True,  # resolved chat-এর actual username থেকে tag
-    #     "schedule_times": [("06:00", "PM")],
-    #     "friday_schedule_times": [("07:00", "PM")],
-    #     "approval_enabled": False,
-    #     "join_requests_per_run": 60,
-    # },
+      {
+          "name": "Target 2",
+          "username": "@Bots_Bangladesh",
+          "id": -1003361310400,
+          "auto_username_tags": True,  # resolved chat-এর actual username থেকে tag
+          "schedule_times": [("09:00", "AM")],
+          "friday_schedule_times": [("07:00", "AM")],
+          "approval_enabled": False,
+          "join_requests_per_run": 00,
+      },
 ]
 
 # 🏷️ Channel tag automation
