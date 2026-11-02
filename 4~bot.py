@@ -20,7 +20,7 @@
 # 🔑 Telegram Credentials (https://my.telegram.org) #pygram session এটা
 API_ID         = 37001641
 API_HASH       = "75aaefa6b305facc4745d25eb1fcf9f4"
-SESSION_STRING = "BQIIe4IACV5OFLbJbrFHblh0B_FxkoHnRqpRbA0DmRrA60bXiRSSfjDNdx_Omep9gx8XaPVDlYegTNkWQMyJDirX8tAYgJgUZ8NkmJXHIlATJ_GKuShfS_OWUhiPYrLELv0PiYfnKpXVSNv3iER1JFBpEJQY7QyFtjUyhxbuokk2BsDT5Z-B4cm-hJDa6HpBktJs4cUmGEvP0hi8PIACb-MADKuiBEpRg8VB79KSrvUEN2XWTksfizA-Ea2nMB_EcT19e47fyKCRLiof82aPLuVmBdwQyZE5C5UKXYJFIWYEvchGLJPKw7CilwZJ71FOX8VvrVnIxj5gWsLLX_gm64ucnp65HQAAAAISgrD2AA"
+SESSION_STRING = "BQIIe4IAOVY8Maf6tHPWhP5SS2a0vm5hIeOb1P1139MhAFr7lD95448UTPZ8RbvY6Gs9dVIE4y_JkhNMU2EsZR2bZISvsw5c8UliSsP7TOAicoxlzCrmQ3jpLctLuhz106T8nPnogsLeTq6FZMCLxU6GI8aNHAk6DBFbAACwgKL886UDHwWziu930msy_QkSlIKBO6fz9TrRZqzX6vSjLPnhUTCSLOkTEWN-5V_w7FRznXeJrjXJdlDUDmJxCIhjg2uKNf4G4dNozWGc-s3TZrauRShzYwV616dQMDXZuEOFjuYfT2OkvSM8uorwJPcxs7JiDf5jUhbK6AeDA9cXRihSWxsD3AAAAAISgrD2AA"
 
 # 📢 Channel সনাক্তকরণ
 #    Username থাকলে username দিন (@ ছাড়া), না থাকলে "" রাখুন
@@ -85,7 +85,7 @@ JOIN_REQUESTS_PER_RUN = 60
 SCHEDULE_TIMES = [
       ("12:00", "AM"),
       ("03:45", "AM"),
-    # ("09:45", "AM"),
+      ("03:45", "PM"),
     # ("11:11", "AM"),
     # ("03:45", "PM"),
     # ("04:30", "PM"),
